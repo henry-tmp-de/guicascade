@@ -36,14 +36,47 @@ import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from ..actions import ActionSpace, ActionSpec
 from ..types import Action, Observation, StepResult
 
-__all__ = ["AndroidEnv", "android_action_space", "find_adb"]
+__all__ = ["AndroidEnv", "android_action_space", "find_adb", "load_apps"]
 
 _DEVICE_XML = "/sdcard/guicascade_ui.xml"
+
+
+def load_apps(path: str | Path = "") -> dict[str, str]:
+    """读「应用显示名 -> 包名」表。默认找仓库里的 `configs/apps.yaml`。
+
+    **读不到就返回空表，而不是抛异常。** 理由是退化的后果很轻：`open_app`
+    依然接受包名，只是模型不能再用中文名指代应用。为了缺一个配置文件就让
+    整个环境起不来，不划算。
+
+    表由 `scripts/scan_apps.py` 扫设备生成——**它是设备数据，不是源代码**，
+    换设备必须重扫。见 `AndroidEnv.apps` 的说明。
+    """
+    candidates = []
+    if path:
+        candidates.append(Path(path))
+    else:
+        here = Path(__file__).resolve()
+        # src/guicascade/envs/android.py -> 仓库根
+        candidates.append(here.parents[3] / "configs" / "apps.yaml")
+
+    for p in candidates:
+        if not p.exists():
+            continue
+        try:
+            import yaml
+
+            data = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+        except Exception:  # noqa: BLE001 - 配置坏了也不该让环境起不来
+            continue
+        apps = data.get("apps")
+        if isinstance(apps, dict):
+            return {str(k): str(v) for k, v in apps.items()}
+    return {}
 
 
 def find_adb() -> str:
@@ -82,6 +115,22 @@ class AndroidEnv:
     adb: str = field(default_factory=find_adb)
     task_package: str = ""
     """任务的 app 包名。`reset` 时会把它强制停止，保证起点干净。"""
+
+    apps: Mapping[str, str] = field(default_factory=dict)
+    """应用显示名 -> 包名。**这是环境的属性，不是模型的知识。**
+
+    ⚠️ 这张表**绝不能写进提示词**。踩过的坑：早先把这张表塞在 `open_app`
+    的参数说明里，模型于是完全不看屏幕——直接拿任务里的"时钟"两个字去表里
+    查包名，一步到位。整个 benchmark 退化成查表题，而我们还以为在测 GUI 能力。
+
+    表本身是必要的（"设置"对应哪个包，这是设备的事实，不是推理能得出的），
+    但正确的做法是**模型说名字、环境去查**，模型不该看见这张表。
+
+    表从哪来：`configs/apps.yaml`，由 `scripts/scan_apps.py` 扫描设备自动生成。
+    换设备必须重扫——这正是它属于环境配置而不是源码的原因。
+    """
+
+    _app_index: dict[str, str] = field(default_factory=dict, init=False, repr=False)
 
     launch_on_reset: bool = False
     """`reset` 时要不要顺带把 `task_package` 启动起来。
@@ -139,6 +188,13 @@ class AndroidEnv:
     _space: ActionSpace | None = field(default=None, init=False, repr=False)
     _screen: tuple[int, int] | None = field(default=None, init=False, repr=False)
     _elements: list[dict[str, Any]] | None = field(default=None, init=False, repr=False)
+    _actionable: list[dict[str, Any]] | None = field(default=None, init=False, repr=False)
+    """**模型看到的那份列表，也是 `click(index=N)` 里 N 的所指。**
+
+    和 `_elements`（全量无障碍树）一起缓存、一起失效。分开缓存是必要的：
+    索引契约要求"模型看到的"和"执行时取的"是同一个列表，随手重算一遍
+    就会错位——这个 bug 代价极大且极难发现。
+    """
     _elements_at: float = field(default=0.0, init=False, repr=False)
 
     elements_ttl: float = 3.0
@@ -154,6 +210,40 @@ class AndroidEnv:
     """
 
     name: str = field(default="android", init=False)
+
+    def __post_init__(self) -> None:
+        # 名字大小写不敏感：模型有时写 "Clock"、有时写 "clock"
+        self._app_index = {
+            str(k).strip().lower(): v for k, v in (self.apps or {}).items()
+        }
+
+    def resolve_app(self, name: str) -> str:
+        """把模型给的应用名解析成包名。**只看名字，不看提示词。**
+
+        接受两种写法：
+
+        - 已经是包名（含 `.`）-> 原样使用。这样即使这张表空了，
+          `open_app` 依然可用，环境也不会因为缺配置而瘫掉。
+        - 显示名 -> 查 `apps` 表。中英文都行（表里两种键都登记）。
+
+        查不到就抛一个**说清楚有哪些可选**的错。这句话会回灌给模型，
+        让它能自己改——报个"KeyError"它只能瞎猜。
+        """
+        q = str(name or "").strip()
+        if not q:
+            raise ValueError("open_app 需要 app_name，你什么也没给")
+
+        if "." in q and " " not in q:
+            return q
+
+        hit = self._app_index.get(q.lower())
+        if hit:
+            return hit
+
+        # 报错里列**原始写法**（Clock / 时钟），不是内部小写索引。
+        # 这句话是给模型看的，给它一份全小写的清单会诱导它继续写小写。
+        known = ", ".join(sorted(self.apps)) if self.apps else "（本设备未登记任何应用名，请直接用包名）"
+        raise ValueError(f"不认识的应用名 {name!r}。可直接用包名，或用以下任一名字：{known}")
 
     # ------------------------------------------------------------------
     # adb 原语
@@ -190,12 +280,26 @@ class AndroidEnv:
         self._elements_at = time.monotonic()
         return self._elements
 
+    def actionable(self) -> list[dict[str, Any]]:
+        """模型能操作的元素列表——**和 `_observe` 渲染出去的必须是同一份**。
+
+        `click(index=N)` 里的 N 就是这个列表的下标。走到这里说明点击时机
+        通常紧跟在观察之后（TTL 内），缓存命中，两份自然一致；即使缓存
+        过期重新 dump，也是从同一棵新树重新算出来的，仍然自洽。
+        """
+        if self._actionable is None:
+            self._actionable = actionable_elements(
+                self.ui_elements(), limit=self.max_elements
+            )
+        return self._actionable
+
     def invalidate(self) -> None:
         """让缓存的屏幕信息立即失效。
 
         执行完动作后调用——**点了之后屏幕就变了，旧的元素树和坐标都不能再用**。
         """
         self._elements = None
+        self._actionable = None
         self._elements_at = 0.0
 
     def screen_size(self) -> tuple[int, int]:
@@ -268,10 +372,12 @@ class AndroidEnv:
     # ------------------------------------------------------------------
 
     def _observe(self, task: str) -> Observation:
-        elements = self.ui_elements()
+        # 走 actionable() 而不是自己过滤一遍：渲染出去的元素和 click 解析用的
+        # 元素**必须是同一个列表**，否则序号错位。
+        elements = self.actionable()
         w, h = self.screen_size()
         return Observation(
-            text=render_elements(elements, limit=self.max_elements),
+            text=render_elements(elements),
             image=self.screenshot() if self.capture_image else None,
             meta={"task": task, "n_elements": len(elements), "w": w, "h": h},
         )
@@ -303,8 +409,8 @@ class AndroidEnv:
         elif a == "keyboard_enter":
             self._run("shell", "input", "keyevent", "KEYCODE_ENTER")
         elif a == "open_app":
-            pkg = args.get("app_name") or args.get("package", "")
-            self._run("shell", "monkey", "-p", str(pkg), "-c",
+            pkg = self.resolve_app(args.get("app_name") or args.get("package", ""))
+            self._run("shell", "monkey", "-p", pkg, "-c",
                       "android.intent.category.LAUNCHER", "1", timeout=30)
         elif a == "wait":
             time.sleep(float(args.get("seconds", 1.0)))
@@ -319,16 +425,20 @@ class AndroidEnv:
         两种写法都支持是刻意的：**无障碍树给的 index 更稳**（不怕分辨率变化、
         不怕界面微调），但模型有时候就是会直接给坐标。两种都接住，比只认一种
         然后频繁报错要好。
+
+        ⚠️ `index` 查的是 `actionable()`——**模型看到的那个列表**，不是全量
+        无障碍树。取错列表会让序号整体错位（见 `actionable_elements` 的说明）。
         """
         if "x" in args and "y" in args:
             return int(args["x"]), int(args["y"])
         if "index" in args:
             idx = int(args["index"])
-            elements = self.ui_elements()
+            elements = self.actionable()
             if not (0 <= idx < len(elements)):
-                raise IndexError(f"元素序号 {idx} 越界（屏幕上有 {len(elements)} 个元素）")
-            b = elements[idx]["bounds"]
-            return (b[0] + b[2]) // 2, (b[1] + b[3]) // 2
+                raise IndexError(
+                    f"元素序号 {idx} 越界（屏幕上可操作的元素是 0~{len(elements) - 1}）"
+                )
+            return elements[idx]["_click_xy"]
         raise ValueError("click 需要 index 或者 x/y")
 
     def _swipe(self, args: dict[str, Any]) -> None:
@@ -353,11 +463,28 @@ class AndroidEnv:
 # --------------------------------------------------------------------------
 
 
+_EDITABLE_HINTS = ("EditText", "AutoCompleteTextView", "SearchView")
+"""判断"能不能输入"。
+
+不用 `class.endswith("EditText")`：那只认得住 `android.widget.EditText`，
+遇到 `AppCompatEditText`、`TextInputEditText`、`AutoCompleteTextView`
+（搜索框基本都是这个）就漏了。**换成子串匹配是刻意放宽**——
+把不可输入的认成可输入，模型顶多白试一次；反过来漏掉一个输入框，
+它就只能干瞪眼。"""
+
+
+def _looks_editable(cls: str) -> bool:
+    return any(h in cls for h in _EDITABLE_HINTS)
+
+
 def _parse_ui_xml(raw: str) -> list[dict[str, Any]]:
     """把 `uiautomator dump` 的 XML 解析成元素列表。
 
     XML 前面可能混着 "UI hierchary dumped to: ..." 这类噪声（官方连
     hierarchy 都拼错了），所以先定位到第一个 `<` 再解析。
+
+    **每个元素记下自己的祖先链**（`_ancestors`，由近及远）。界面上真正挂着
+    点击事件的，经常是包住文字的那层容器而不是文字本身，点哪里要靠它算。
     """
     start = raw.find("<?xml")
     if start < 0:
@@ -371,21 +498,37 @@ def _parse_ui_xml(raw: str) -> list[dict[str, Any]]:
         return []
 
     out: list[dict[str, Any]] = []
-    for node in root.iter("node"):
+
+    def visit(node: ET.Element, ancestors: tuple[int, ...]) -> None:
         bounds = _parse_bounds(node.get("bounds", ""))
         if bounds is None:
-            continue
+            return
+        idx = len(out)
         out.append({
             "text": node.get("text", "") or "",
             "desc": node.get("content-desc", "") or "",
             "class": (node.get("class", "") or "").split(".")[-1],
             "resource_id": node.get("resource-id", "") or "",
             "clickable": node.get("clickable") == "true",
-            "editable": node.get("class", "").endswith("EditText"),
+            "editable": _looks_editable(node.get("class", "") or ""),
             "scrollable": node.get("scrollable") == "true",
-            "enabled": node.get("enabled") == "true",
+            # ⚠️ 缺省必须是 **true**（fail-open），不能是 false。
+            #
+            # 有些机型的 dump 不带 `enabled` 属性，写成 `== "true"` 会把它们
+            # 全判成"已禁用"——后果不只是少显示一个标记：点击时找可点击祖先
+            # 也会因此跳过它们，于是**所有点击都上浮不过去**，模型点哪都没用。
+            # 这个失败模式极难查：界面上一切正常，只是点什么都没反应。
+            "enabled": node.get("enabled", "true") == "true",
             "bounds": bounds,
+            "_ancestors": ancestors,
         })
+        for child in node:
+            if child.tag == "node":
+                visit(child, (idx,) + ancestors)
+
+    for node in root:
+        if node.tag == "node":
+            visit(node, ())
     return out
 
 
@@ -396,26 +539,90 @@ def _parse_bounds(s: str) -> tuple[int, int, int, int] | None:
     return tuple(int(g) for g in m.groups())  # type: ignore[return-value]
 
 
-def render_elements(elements: list[dict[str, Any]], *, limit: int = 60) -> str:
-    """把元素列表渲染成给模型看的纯文本。
+def _is_interesting(e: dict[str, Any]) -> bool:
+    """值得给模型看的元素：能交互，或者带文字。
 
-    只保留**能交互或带文字**的元素——纯布局容器（FrameLayout/LinearLayout）
-    对模型没有信息量，渲染出来只是噪声，还会挤掉真正有用的那几十个。
+    纯布局容器（FrameLayout / LinearLayout 这些）对模型没有信息量，
+    渲染出来只是噪声，还会把真正有用的那几十个挤出窗口。
+    """
+    return bool(e["clickable"] or e["editable"] or e["scrollable"]
+                or e["text"] or e["desc"])
+
+
+def _has_area(e: dict[str, Any]) -> bool:
+    """宽高都大于 0。
+
+    无障碍树里存在 `[0,0][0,0]` 这种零尺寸占位节点——它们看不见也点不着，
+    留在列表里只会白白占掉一个序号。
+    """
+    x1, y1, x2, y2 = e["bounds"]
+    return x2 > x1 and y2 > y1
+
+
+def actionable_elements(
+    elements: list[dict[str, Any]], *, limit: int = 60
+) -> list[dict[str, Any]]:
+    """**模型能看到的元素列表，同时也就是 `click(index=N)` 里 N 的所指。**
+
+    ⚠️ 这个函数是整个索引契约的唯一来源，**渲染和点击都必须用它**。
+
+    踩过的坑：早先渲染时过滤掉了不可交互节点、序号重新编，而点击时却按
+    未过滤的原始列表取坐标。只要前面被过滤掉一个节点，后面**所有序号全部
+    错位**——模型说点第 7 个，实际点到了别的地方。表现是模型"点了没反应"，
+    看起来像它卡住，其实是框架在骗它。
+    """
+    out = []
+    for e in elements:
+        if not (_is_interesting(e) and _has_area(e)):
+            continue
+        shown = dict(e)
+        shown["_click_xy"] = _resolve_click(elements, e)
+        out.append(shown)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _resolve_click(raw: list[dict[str, Any]], e: dict[str, Any]) -> tuple[int, int]:
+    """算出"点这个元素"时该往哪点。
+
+    规则：**元素自己可点击就点自己；否则往上找最近的可点击祖先。**
+
+    为什么要往上找：安卓界面里很常见 `<可点击的列表项><不可点击的文字>` 这种
+    结构，真正挂 `OnClickListener` 的是外层容器，文字只是容器里的一个标签。
+
+    只找**最近**的那一个，不做"面积最小""不超过屏幕几成"之类的启发式——
+    最近即最具体，而任何基于面积/比例的规则都会随界面布局变化，
+    那就不叫泛用了。
+
+    `raw` 是未过滤的全量列表，祖先存的是它的下标。
+    """
+    if e["clickable"] or not e.get("_ancestors"):
+        return _center(e["bounds"])
+    for a in e["_ancestors"]:                      # 由近及远
+        anc = raw[a]
+        if anc["clickable"] and anc["enabled"]:
+            return _center(anc["bounds"])
+    return _center(e["bounds"])
+
+
+def _center(bounds: tuple[int, int, int, int]) -> tuple[int, int]:
+    x1, y1, x2, y2 = bounds
+    return (x1 + x2) // 2, (y1 + y2) // 2
+
+
+def render_elements(elements: list[dict[str, Any]], *, limit: int = 60) -> str:
+    """把**已经过滤好的**元素列表渲染成给模型看的纯文本。
+
+    入参必须是 `actionable_elements()` 的返回值——它编的序号就是模型说的
+    序号，本函数**不再做任何过滤**（过滤一次就够了，过滤两次就会错位）。
 
     ⚠️ 这段文本会原样进提示词，所以它必须包在 `<screen source="device">` 里
     （由 `prompts.py` 负责），而且**不要在这里拼任何指令性文字**——
     屏幕内容是不可信输入，见 prompts.py 关于提示注入的说明。
     """
     lines = []
-    shown = 0
     for i, e in enumerate(elements):
-        interesting = e["clickable"] or e["editable"] or e["scrollable"] or e["text"] or e["desc"]
-        if not interesting:
-            continue
-        if shown >= limit:
-            lines.append(f"...（还有 {len(elements) - i} 个元素未显示）")
-            break
-
         label = e["text"] or e["desc"]
         flags = []
         if e["clickable"]:
@@ -430,10 +637,9 @@ def render_elements(elements: list[dict[str, Any]], *, limit: int = 60) -> str:
         ident = f" id={e['resource_id'].split('/')[-1]}" if e["resource_id"] else ""
         x1, y1, x2, y2 = e["bounds"]
         lines.append(
-            f"[{shown}] <{e['class']}> {label!r}{'' if not flags else ' ' + ' '.join(flags)}"
+            f"[{i}] <{e['class']}> {label!r}{'' if not flags else ' ' + ' '.join(flags)}"
             f"{ident} bounds=({x1},{y1},{x2},{y2})"
         )
-        shown += 1
     return "\n".join(lines) if lines else "(屏幕上没有可交互元素)"
 
 
@@ -535,32 +741,27 @@ def android_action_space() -> ActionSpace:
     _add(ActionSpec(
         name="open_app",
         description=(
-            "直接按包名启动一个 app。**这是打开 app 最快、最可靠的方式**，"
+            "按名字启动一个 app。**这是打开 app 最快的方式**，"
             "优先用它，不要去桌面上找图标——很多 app 的图标并不在桌面第一页，"
-            "在桌面上滚动或搜索往往要试很多步，而且容易卡住。"
-            "只要你能确定目标 app 的包名，就用这个动作一步到位。"
+            "在桌面上滚动或搜索往往要试很多步。"
+            "app_name 填任务里那个应用的名字就行，环境会自己查它对应哪个包。"
         ),
         parameters={
             "type": "object",
             "properties": {
                 "app_name": {
                     "type": "string",
-                    # ⚠️ 这些包名是在 Pixel 6 / API 33 这个具体镜像上
-                    # 用 `adb shell pm list packages` 查出来的，不是猜的。
-                    # 第一版写的 com.android.deskclock / com.android.contacts
-                    # 在这个镜像上根本不存在，模型照抄之后一步都走不动。
-                    # **换镜像时这张表必须重新查。**
-                    "description": (
-                        "app 的包名。常用："
-                        "com.android.settings=设置，"
-                        "com.google.android.contacts=联系人，"
-                        "com.google.android.deskclock=时钟，"
-                        "com.android.camera2=相机，"
-                        "com.google.android.documentsui=文件管理，"
-                        "com.google.android.calendar=日历，"
-                        "com.google.android.apps.maps=地图，"
-                        "com.google.android.apps.messaging=信息"
-                    ),
+                    # ⚠️ 这里**故意不写任何包名对照表**。
+                    #
+                    # 早先的版本写了（"com.google.android.deskclock=时钟，…"），
+                    # 后果是模型完全不看屏幕：拿任务里的"时钟"两个字去表里一查，
+                    # 一步到位，整个 benchmark 退化成查表题——而我们还以为
+                    # 自己在测 GUI 能力。
+                    #
+                    # 对照表本身没错（"设置"是哪个包，那是设备的事实，推不出来），
+                    # 错在**放进了模型能看见的地方**。现在它属于环境配置，
+                    # 由 scripts/scan_apps.py 扫设备生成。
+                    "description": "应用的显示名，如「时钟」「Clock」「设置」。也可以直接给包名。",
                 },
             },
             "required": ["app_name"],
