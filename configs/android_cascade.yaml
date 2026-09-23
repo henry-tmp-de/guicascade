@@ -1,8 +1,14 @@
 # 真实安卓环境上的级联配置。
 #
-# 两个监控器的分工（这是实测后的选型结果，不是随手配的）：
-#   milestone  用 BERT  —— 实测 AUC 0.78，可用
-#   stuck      用 prompt —— BERT 版实测 AUC 0.61 不可用，改用免训练的提示词版
+# 两个监控器的分工（**这是实测后的选型结果，不是随手配的**）：
+#
+#   milestone  用 BERT    —— 跨环境能迁移（桌面 0.782 → 安卓 0.725），可用
+#   stuck      用 repeat  —— BERT 版实测失效（安卓 AUC 0.423，比瞎猜还差），
+#                            换成纯代码数重复
+#
+# 为什么 stuck 不用 prompt 版：提示词版每步都要调一次模型，那就不叫
+# "常驻的廉价监控器"了——级联省下来的钱会被监控器自己吃掉。
+# 数重复是纯字符串比较，零延迟零成本，这才是常驻监控器该有的样子。
 #
 # 模型跑在 GPU 服务器上；本机只跑 agent 主循环 + 安卓环境。
 # 这也是为什么延迟必须拆成模型侧/环境侧两个数：一个跨网络，一个在本地。
@@ -40,23 +46,37 @@ policy:
 
   router:
     type: cascade_router
-    theta_stuck: 0.50
-    theta_milestone: 0.50       # ⚠️ 上线前必须按实测分布校准，别用默认值
+
+    # ⚠️⚠️ 这两个阈值别照抄 0.5，它们和监控器内部的打分口径是**联动**的。
+    #
+    # `RepeatMonitor` 打的是 `重复次数 / min_repeats`：
+    #
+    #     min_repeats=3, theta_stuck=1.0   ->  重复满 3 次才触发  ✅ 这是实测选定的
+    #     min_repeats=3, theta_stuck=0.5   ->  重复满 2 次就触发     ❌ 等于把 N 改成了 2
+    #
+    # 因为 `Router` 用的是 `>=` 比较，2/3 = 0.667 已经越过 0.5 了。
+    # 这个坑很隐蔽：配置上写着"3 次"，实际跑出来是"2 次"，日志里看不出来。
+    theta_stuck: 1.0
+    theta_milestone: 0.50       # ⚠️ 这个确实要按实测分布校准，见 scripts/threshold_sweep.py
     min_steps: 2
-    hold_steps: 1
+    hold_steps: 1               # 升级后至少再走 1 步大模型，避免来回横跳
 
     milestone:
       type: bert
       model_path: /home/ziru/guicascade/models/milestone-detector
       threshold: 0.50
 
-    # 卡住侧用提示词版：BERT 版实测不可用，这里零训练成本顶上
+    # 卡住侧：纯代码，不加载任何模型。
+    #
+    # min_repeats=3 是扫出来的拐点（scripts/eval_repeat_detector.py）：
+    #   2 次  -> 召回最高（9/9），但升级率也最高（68%）
+    #   3 次  -> 召回 8/9，升级率降到 50%，**拐点在这**
+    #   4 次  -> 召回掉到 6/9，不值
+    #
+    # 更关键的一条：在健康轨迹上它一次都不触发。大模型跑的那 7 条两 steps
+    # 就收尾的轨迹，升级率是 0%。
     stuck:
-      type: prompt
-      mode: stuck
-      model:
-        type: openai_compat
-        name: qwen3-vl-2b
-        base_url: http://10.201.126.245:8000/v1
-        temperature: 0.0
-        max_tokens: 128
+      type: repeat
+      mode: streak              # streak 抓原地不动；count 抓交替打转，但更贵
+      min_repeats: 3
+      window: 6
