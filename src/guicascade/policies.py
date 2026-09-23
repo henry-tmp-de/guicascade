@@ -84,9 +84,20 @@ class SingleModelPolicy:
     """
 
     max_history: int = 6
-    """历史里带多少步。默认 6 和官方监控器的窗口对齐，两边看到的东西一致。"""
+    """历史里带多少步。默认 6 和监控器的窗口对齐，两边看到的东西一致。"""
 
-    name: str = "single"
+    include_image: bool = False
+    """要不要把截图一并发给模型。
+
+    默认 **False**，因为有两类模型：
+
+    - **纯文本模型**：只吃无障碍树渲染出的文本，发图它也不看，白花带宽和 prefill
+    - **视觉模型**（Qwen3-VL 这类）：截图能提供无障碍树给不了的信息——
+      图标长什么样、界面渲染有没有出错、弹窗是不是挡住了
+
+    默认关掉是刻意的：截图在安卓环境里值 ~1.9 秒/步（见 envs/android.py），
+    开着它就该是**明确的选择**而不是默认行为。
+    """
 
     _system_cache: str | None = field(default=None, repr=False)
 
@@ -109,7 +120,7 @@ class SingleModelPolicy:
         """
         messages: list[Message] = [
             {"role": "system", "content": self._system()},
-            {"role": "user", "content": self._user(task, observation, history, extra)},
+            {"role": "user", "content": self._content(task, observation, history, extra)},
         ]
 
         t0 = time.perf_counter()
@@ -147,8 +158,10 @@ class SingleModelPolicy:
             blocks.append(self.toolkit.describe())
         return "\n".join(b for b in blocks if b)
 
-    def _user(self, task: str, observation: Observation, history: Sequence[Step], extra: str) -> str:
-        """拼这一步的 user 消息。
+    def _content(self, task: str, observation: Observation, history: Sequence[Step], extra: str):
+        """拼这一步的 user 消息内容。
+
+        纯文本模型返回字符串，视觉模型返回 OpenAI 的多模态数组。
 
         历史是**渲染成文本**塞进来的（而不是保留多轮消息结构），两个理由：
         一是提示词长度有界，不会随步数无限增长；二是渲染格式和喂给监控器的
@@ -161,7 +174,16 @@ class SingleModelPolicy:
         parts.append(_screen_block(observation.text))
         parts.append(f"# 到目前为止\n\n{render_episode(history, max_steps=self.max_history)}")
         parts.append("请按工作流程思考，然后输出下一步动作。")
-        return "\n\n".join(parts)
+        text = "\n\n".join(parts)
+
+        if not (self.include_image and observation.image):
+            return text
+
+        # 图放在文字之后：先给结构化的无障碍树，再给像素。
+        # 反过来会让模型先看图、再看文字，容易忽略后者里更精确的元素序号。
+        from .models.openai_compat import image_part, text_part
+
+        return [text_part(text), image_part(observation.image)]
 
 
 @dataclass

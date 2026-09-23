@@ -1,0 +1,14 @@
+# 安卓环境 + 单模型（小）。用来验证闭环，也做下界基线。
+policy:
+  type: single
+  label: small
+  is_strong: false
+  action_space: {type: android}
+  max_history: 6
+  include_image: false
+  model:
+    type: openai_compat
+    name: qwen3-vl-2b
+    base_url: http://10.201.126.245:8000/v1
+    temperature: 0.0
+    max_tokens: 512

@@ -151,6 +151,18 @@ _JSON_FENCE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
 _CALL_SYNTAX = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*\((.*)\)\s*$", re.DOTALL)
 _KWARG = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+?)(?=,\s*[A-Za-z_][A-Za-z0-9_]*\s*=|$)", re.DOTALL)
 
+# 键值对分行写法。视觉模型（Qwen-VL / UI-TARS 这些）很爱这么输出：
+#
+#     action: click
+#     x: 76
+#     y: 1873
+#
+# 它和 `Action: click(index=3)` 表达的是同一件事，只是一个横着写、一个竖着写。
+# 光靠正则救不回来，得单独认。
+_KV_ACTION = re.compile(r"^\s*action\s*[:：]\s*([A-Za-z_][A-Za-z0-9_]*)\s*$",
+                        re.IGNORECASE | re.MULTILINE)
+_KV_PAIR = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*[:：]\s*(.+?)\s*$")
+
 
 def decode(
     response: ModelResponse,
@@ -205,6 +217,13 @@ def _from_tool_call(call, space: ActionSpace, toolkit: Toolkit | None) -> Action
 
 
 def _from_text(text: str, space: ActionSpace, toolkit: Toolkit | None) -> Action:
+    # 策略零：键值对分行写法。必须**先于** _extract_payload 试——
+    # 因为 `action: click` 这一行本身会被 _ACTION_LINE 命中、截成 "click"，
+    # 后面几行的 x/y 就丢了。
+    kv = _try_kv(text, space, toolkit)
+    if kv is not None:
+        return kv
+
     payload = _extract_payload(text)
 
     # 策略一：整个 payload 就是个 JSON 对象
@@ -229,6 +248,39 @@ def _from_text(text: str, space: ActionSpace, toolkit: Toolkit | None) -> Action
         "例如：Action: click(index=3)\n"
         f"可用的界面动作：{', '.join(sorted(space.specs)) or '（无）'}"
     )
+
+
+def _try_kv(text: str, space: ActionSpace, toolkit: Toolkit | None) -> Action | None:
+    """认 `action: click` 换行再写 `x: 76` 的写法。
+
+    返回 None 表示"这段文本不是这个格式"，交给后面的策略。
+    注意正则要求 action 名**单独占一行**（没有括号），所以
+    `Action: click(index=3)` 不会被误判。
+    """
+    m = _KV_ACTION.search(text)
+    if not m:
+        return None
+
+    name = m.group(1)
+    args: dict[str, Any] = {}
+    for line in text[m.end():].splitlines():
+        if not line.strip():
+            continue
+        pair = _KV_PAIR.match(line)
+        if pair:
+            args[pair.group(1)] = _coerce(pair.group(2))
+            if len(args) >= 8:
+                break
+        elif args:
+            # 已经收到参数了，再遇到非键值行就认为这一段结束了
+            break
+
+    # 名字既不认识也不是工具 -> 这段文本不是在说动作，别硬解
+    known = space.get(name) is not None or (toolkit is not None and name in toolkit.tools)
+    if not known:
+        return None
+
+    return _finish(name, args, space, toolkit)
 
 
 def _extract_payload(text: str) -> str:

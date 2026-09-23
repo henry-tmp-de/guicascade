@@ -81,7 +81,23 @@ class AndroidEnv:
     serial: str = "emulator-5554"
     adb: str = field(default_factory=find_adb)
     task_package: str = ""
-    """任务的 app 包名。reset 时会先关掉它再重启，保证起点干净。"""
+    """任务的 app 包名。`reset` 时会把它强制停止，保证起点干净。"""
+
+    launch_on_reset: bool = False
+    """`reset` 时要不要顺带把 `task_package` 启动起来。
+
+    ⚠️ 默认 **False**，这是个踩过坑的默认值。
+
+    对"打开某个 app"这类任务，reset 时把它打开等于**把答案直接送给模型**：
+    模型第一步看到目标界面，直接输出 `finish`，程序化判分在第一秒就通过——
+    但 agent 什么都没做。这个假成功极难发现，因为**每个环节看起来都正常**。
+
+    默认停在桌面，让 agent 真的去走这一步。只有任务确实是"在这个 app 内部
+    做点什么"时，才把它设成 True。
+    """
+
+    go_home_on_reset: bool = True
+    """`reset` 时是否先回桌面。起点不确定会让不同 run 之间没法比较。"""
 
     step_wait: float = 0.6
     """每个动作之后的固定等待。界面动画没结束就截图，拿到的是中间态。"""
@@ -109,6 +125,20 @@ class AndroidEnv:
 
     _space: ActionSpace | None = field(default=None, init=False, repr=False)
     _screen: tuple[int, int] | None = field(default=None, init=False, repr=False)
+    _elements: list[dict[str, Any]] | None = field(default=None, init=False, repr=False)
+    _elements_at: float = field(default=0.0, init=False, repr=False)
+
+    elements_ttl: float = 3.0
+    """无障碍树的缓存有效期（秒）。
+
+    ⚠️ **这个缓存值 2.5 秒/步**，因为它避免了一次完全重复的 `uiautomator dump`：
+    `click(index=N)` 需要知道第 N 个元素的坐标，而观察时刚刚 dump 过整棵树。
+    不缓存的话每个点击步骤都要白等 2.5 秒。
+
+    用 TTL 而不是"永久缓存"是因为**动作会改变屏幕**：点完之后整棵树就过期了。
+    3 秒足够覆盖"观察 -> 决策 -> 执行"这一个来回，又短到不会让两次动作之间
+    误用旧树。
+    """
 
     name: str = field(default="android", init=False)
 
@@ -134,11 +164,26 @@ class AndroidEnv:
         """
         return self._run("exec-out", "screencap", "-p", timeout=30)
 
-    def ui_elements(self) -> list[dict[str, Any]]:
-        """无障碍树里的元素列表。"""
+    def ui_elements(self, *, fresh: bool = False) -> list[dict[str, Any]]:
+        """无障碍树里的元素列表。默认走缓存，见 `elements_ttl`。"""
+        now = time.monotonic()
+        if (not fresh and self._elements is not None
+                and now - self._elements_at < self.elements_ttl):
+            return self._elements
+
         self._run("shell", "uiautomator", "dump", _DEVICE_XML, timeout=30)
         raw = self._run("shell", "cat", _DEVICE_XML, timeout=30).decode("utf-8", "replace")
-        return _parse_ui_xml(raw)
+        self._elements = _parse_ui_xml(raw)
+        self._elements_at = time.monotonic()
+        return self._elements
+
+    def invalidate(self) -> None:
+        """让缓存的屏幕信息立即失效。
+
+        执行完动作后调用——**点了之后屏幕就变了，旧的元素树和坐标都不能再用**。
+        """
+        self._elements = None
+        self._elements_at = 0.0
 
     def screen_size(self) -> tuple[int, int]:
         """屏幕分辨率。**只查一次并缓存**——屏幕尺寸在一次运行里不会变，
@@ -154,11 +199,23 @@ class AndroidEnv:
     # ------------------------------------------------------------------
 
     def reset(self, task: str) -> Observation:
+        """把设备恢复到确定的起点。
+
+        顺序是刻意的：先停掉目标任务（清掉残留状态，否则上一次 run 的界面
+        会留在屏幕上），再回桌面。两步都做才叫"起点确定"——
+        不同 run 从不同起点出发，结果之间就没法比较。
+        """
         if self.task_package:
             self._run("shell", "am", "force-stop", self.task_package)
+        if self.go_home_on_reset:
+            self._run("shell", "input", "keyevent", "KEYCODE_HOME")
+        time.sleep(self.step_wait)
+
+        if self.launch_on_reset and self.task_package:
             self._run("shell", "monkey", "-p", self.task_package,
                       "-c", "android.intent.category.LAUNCHER", "1", timeout=30)
             time.sleep(self.step_wait * 2)
+
         return self._observe(task)
 
     def step(self, action: Action) -> StepResult:
@@ -168,6 +225,9 @@ class AndroidEnv:
             ok, error = True, ""
         except Exception as e:  # noqa: BLE001 - 动作失败是常态，不该中断 episode
             ok, error = False, f"{type(e).__name__}: {e}"
+        finally:
+            # 不管成没成，屏幕都可能变了（点了个不存在的元素也可能触发了滚动）
+            self.invalidate()
 
         observation = self._observe("")
         return StepResult(

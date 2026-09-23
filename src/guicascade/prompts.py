@@ -53,6 +53,28 @@ Step 4. 检查
   回顾上一步：它达到预期了吗？
   连续两次做同样的事没有进展，说明这条路走不通，换一种方法。
 
+# 输出格式
+
+**你必须严格按下面这一行格式输出动作**，动作名后面跟括号和参数：
+
+```
+Action: 动作名(参数名=值, 参数名=值)
+```
+
+正确示例（照这个写）：
+
+```
+Action: click(index=3)
+Action: input_text(text='你好')
+Action: scroll(direction='down')
+Action: open_app(app_name='com.android.settings')
+```
+
+**不要**写成下面这些形式——它们无法被解析，会让你这一步白费：
+`action: click` 换行再写 `x: 76` / `{{"name": "click", ...}}` / `点击第三个元素`。
+
+先写一两句话说明你的判断，然后另起一行写 `Action: ...`。
+
 # 任务完成
 
 任务达成时，用 finish 动作明确宣告结束，并在 reason 里说明凭什么判定成功了。

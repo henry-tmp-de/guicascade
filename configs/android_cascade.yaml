@@ -1,0 +1,62 @@
+# 真实安卓环境上的级联配置。
+#
+# 两个监控器的分工（这是实测后的选型结果，不是随手配的）：
+#   milestone  用 BERT  —— 实测 AUC 0.78，可用
+#   stuck      用 prompt —— BERT 版实测 AUC 0.61 不可用，改用免训练的提示词版
+#
+# 模型跑在 GPU 服务器上；本机只跑 agent 主循环 + 安卓环境。
+# 这也是为什么延迟必须拆成模型侧/环境侧两个数：一个跨网络，一个在本地。
+
+policy:
+  type: cascade
+
+  small:
+    type: single
+    label: small
+    is_strong: false
+    action_space: {type: android}
+    max_history: 6
+    include_image: false        # 纯文本先跑通；开图每步多 ~1.9s
+    model:
+      type: openai_compat
+      name: qwen3-vl-2b
+      base_url: http://10.201.126.245:8000/v1
+      temperature: 0.0
+      max_tokens: 512
+
+  large:
+    type: single
+    label: large
+    is_strong: true
+    action_space: {type: android}
+    max_history: 6
+    include_image: false
+    model:
+      type: openai_compat
+      name: qwen3-vl-8b
+      base_url: http://10.201.126.245:8001/v1
+      temperature: 0.0
+      max_tokens: 512
+
+  router:
+    type: cascade_router
+    theta_stuck: 0.50
+    theta_milestone: 0.50       # ⚠️ 上线前必须按实测分布校准，别用默认值
+    min_steps: 2
+    hold_steps: 1
+
+    milestone:
+      type: bert
+      model_path: /home/ziru/guicascade/models/milestone-detector
+      threshold: 0.50
+
+    # 卡住侧用提示词版：BERT 版实测不可用，这里零训练成本顶上
+    stuck:
+      type: prompt
+      mode: stuck
+      model:
+        type: openai_compat
+        name: qwen3-vl-2b
+        base_url: http://10.201.126.245:8000/v1
+        temperature: 0.0
+        max_tokens: 128
