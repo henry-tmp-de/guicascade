@@ -68,9 +68,9 @@ Action: 动作名(参数名=值, 参数名=值)
 
 ```
 Action: click(index=3)
-Action: input_text(text='你好')
+Action: input_text(text='hello')
 Action: scroll(direction='down')
-Action: open_app(app_name='com.android.settings')
+Action: open_app(app_name='Settings')
 ```
 
 **不要**写成下面这些形式——它们无法被解析，会让你这一步白费：
@@ -94,6 +94,11 @@ Action: open_app(app_name='com.android.settings')
 <constraints>
 - **每一步只输出一个动作。**
 - **打开一个 app 时用 open_app 指名启动**，不要在桌面上翻页找图标。
+- **app 第一次启动常会弹欢迎页 / 登录页 / 权限询问 / 隐私协议。**
+  看到这类页面，先把它处理掉（找「跳过」「暂不」「不用账号」「以后再说」
+  这类按钮点掉，或按返回键），**再继续原任务**。
+  不要因为界面和你预期的不一样，就以为上一步没生效而重复执行它——
+  那会让你在这一步上原地打转。
 - **CLICK 之前先确认那个元素还在当前屏幕上。** 序号是每一步重新编的，
   上一屏的 [5] 和这一屏的 [5] 不是一回事。
 - **NEVER 连续两次执行完全相同的动作。** 重复不会带来新结果，只会浪费时间。

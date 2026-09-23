@@ -87,7 +87,22 @@ class Agent:
                     break
 
                 # —— 执行侧：按动作类型分派 ——
-                step = self._execute(index, observation, decision)
+                #
+                # 环境异常（adb 断连、dump 连续失败、设备卡死）也**判负而不是
+                # 抛出去**，理由和上面解析失败那条一样：批量跑实验时，
+                # 一个任务把整批带崩是不可接受的。
+                #
+                # ⚠️ 但要区分开归因：这是**环境**坏了，不是模型不会。
+                # 所以 abort_reason 里写清楚是哪一侧出的问题——
+                # 否则这种失败会混进成功率里，看起来像"模型变差了"。
+                try:
+                    step = self._execute(index, observation, decision)
+                except Exception as e:  # noqa: BLE001
+                    trajectory.meta["abort_reason"] = (
+                        f"环境异常（{type(e).__name__}）：{e}"
+                    )
+                    trajectory.meta["abort_side"] = "env"
+                    break
                 trajectory.steps.append(step)
 
                 if self.tracer is not None:

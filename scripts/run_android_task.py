@@ -32,68 +32,19 @@ from guicascade.registry import build  # noqa: E402
 from guicascade.tools import FinishTool, NoteTool, Toolkit  # noqa: E402
 from guicascade.trace import Tracer  # noqa: E402
 
-
-# --------------------------------------------------------------------------
-# 任务定义：一个任务 = 一句指令 + 一段程序化判分
-# --------------------------------------------------------------------------
+from android_tasks import build_tasks  # noqa: E402
 
 
-@dataclass
-class Task:
-    name: str
-    instruction: str
-    check: Callable[[str], bool]
-    package: str = ""
-
-
-def _dumpsys(serial: str, adb: str) -> str:
-    out = subprocess.run(
-        [adb, "-s", serial, "shell", "dumpsys", "window", "displays"],
-        capture_output=True, timeout=30,
-    ).stdout.decode("utf-8", "replace")
-    if "mCurrentFocus" not in out:
-        out += subprocess.run(
-            [adb, "-s", serial, "shell", "dumpsys", "activity", "activities"],
-            capture_output=True, timeout=30,
-        ).stdout.decode("utf-8", "replace")
-    return out
-
-
-def _foreground_package(serial: str, adb: str) -> str:
-    text = _dumpsys(serial, adb)
-    m = re.search(r"mCurrentFocus=Window\{[^}]*?\s([\w\.]+)/", text)
-    if not m:
-        m = re.search(r"mFocusedApp.*?\s([\w\.]+)/", text)
-    return m.group(1) if m else ""
-
-
-TASKS: dict[str, Callable[[str, str], Task]] = {
-    "open_settings": lambda serial, adb: Task(
-        name="open_settings",
-        instruction="打开系统设置应用（Settings）。",
-        check=lambda _: _foreground_package(serial, adb) == "com.android.settings",
-        package="com.android.settings",
-    ),
-    "open_contacts": lambda serial, adb: Task(
-        name="open_contacts",
-        instruction="打开联系人应用（Contacts）。",
-        check=lambda _: "contacts" in _foreground_package(serial, adb),
-        package="com.android.contacts",
-    ),
-    "open_clock": lambda serial, adb: Task(
-        name="open_clock",
-        instruction="打开时钟应用（Clock）。",
-        check=lambda _: "clock" in _foreground_package(serial, adb) or
-                        "deskclock" in _foreground_package(serial, adb),
-        package="com.android.deskclock",
-    ),
-}
+# 任务定义统一放在 `android_tasks.py`，这里不再重复一份。
+#
+# 早先这里抄了一份，包名写的是 `com.android.contacts`——而本机根本没有这个包，
+# 模型照抄之后一步都走不动。**判分逻辑只能有一处**，抄一份就多一处会过期的。
 
 
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", required=True)
-    ap.add_argument("--task", default="open_settings", choices=sorted(TASKS))
+    ap.add_argument("--task", default="settings_airplane_on")
     ap.add_argument("--serial", default="emulator-5554")
     ap.add_argument("--max-steps", type=int, default=12)
     ap.add_argument("--trace", default="")
@@ -103,7 +54,11 @@ def main() -> int:
     import yaml
 
     adb = find_adb()
-    task = TASKS[args.task](args.serial, adb)
+    tasks = build_tasks(adb, args.serial)
+    if args.task not in tasks:
+        print(f'没有名为 {args.task!r} 的任务。可用：{", ".join(sorted(tasks))}')
+        return 2
+    task = tasks[args.task]
 
     cfg = yaml.safe_load(Path(args.config).read_text(encoding="utf-8"))
     policy = build("policy", cfg["policy"])
@@ -138,9 +93,9 @@ def main() -> int:
 
     print("=" * 74)
     time.sleep(1.5)   # 等界面稳定再判分
-    success = task.check("")
+    success = task.check()
     print(f"  程序化判分 : {'✅ 成功' if success else '❌ 失败'}")
-    print(f"  当前前台包 : {_foreground_package(args.serial, adb) or '(读不到)'}")
+    print(f"  当前前台包 : {foreground_package(adb, args.serial) or '(读不到)'}")
     print(f"  步数       : {len(traj.steps)}")
     print(f"  强模型占比 : {traj.escalation_rate:.1%}")
     print(f"  模型侧耗时 : {traj.model_latency_s:.2f}s   ← 级联能省的")

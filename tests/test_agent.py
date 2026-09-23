@@ -53,9 +53,20 @@ def test_runs_and_produces_trajectory(space: ActionSpace) -> None:
     assert traj.reward == 1.0
 
 
-def test_env_is_closed_even_on_crash(space: ActionSpace) -> None:
-    """中途炸了也必须关环境。模拟器/browser 泄漏一个会影响后面所有实验。"""
+def test_env_failure_aborts_cleanly_instead_of_crashing(space: ActionSpace) -> None:
+    """环境炸了：**判负并关掉环境**，不要把异常抛出去。
 
+    这条改过一次行为，值得说清楚为什么。
+
+    原来的实现是把异常抛出去，测试也断言 `pytest.raises(RuntimeError)`。
+    但真实场景里（跑 116 个任务的批量实验）这**不可接受**：一个任务因为
+    `adb` 抖一下就抛出去，会把整批实验带崩，前面几十条轨迹白跑。
+    环境抖动本来就是常态，不该升级成实验级故障。
+
+    ⚠️ 但必须**归因清楚**：这是**环境**坏了，不是模型不会。所以
+    `abort_reason` 要写明是哪一侧，并单独打 `abort_side="env"` 的标记——
+    否则这种失败会混进成功率，看起来像"模型变差了"。
+    """
     class Boom(ScriptedEnvironment):
         def step(self, action):
             raise RuntimeError("设备掉线了")
@@ -64,9 +75,11 @@ def test_env_is_closed_even_on_crash(space: ActionSpace) -> None:
     policy = SingleModelPolicy(ScriptedModel("m", ["Action: click(index=1)"]), space)
     agent = Agent(env, policy)
 
-    with pytest.raises(RuntimeError):
-        agent.run("t")
-    assert env.closed is True
+    traj = agent.run("t")           # 不抛异常
+
+    assert env.closed is True       # 原来那条保证仍然成立
+    assert traj.meta.get("abort_side") == "env"
+    assert "设备掉线了" in traj.meta.get("abort_reason", "")
 
 
 def test_max_steps_is_respected(space: ActionSpace) -> None:

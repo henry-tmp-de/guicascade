@@ -40,7 +40,7 @@ from guicascade.envs.android import AndroidEnv, find_adb, load_apps  # noqa: E40
 from guicascade.registry import build  # noqa: E402
 from guicascade.tools import FinishTool, NoteTool, Toolkit  # noqa: E402
 
-from android_tasks import build_tasks  # noqa: E402
+from android_tasks import build_tasks, check_network, cleanup_device  # noqa: E402
 
 
 def max_repeat_run(actions: list[str]) -> int:
@@ -68,6 +68,22 @@ def main() -> int:
     import yaml
 
     adb = find_adb()
+    # 网络自检要在**任何任务开跑之前**做。这条失败链上没有一步会报错：
+    # 网络坏了 -> 任务做不成 -> 判分记成"模型不会"。堵在这里，别让它进数据。
+    ok_net, why = check_network(adb, args.serial)
+    if not ok_net:
+        print("")
+        print("❌ 环境自检不通过：" + why)
+        print("   网络不通的话，浏览器那类任务必挂，这种成绩不能算数。")
+        print("   先修网络再跑。常见修法：")
+        print("     adb shell svc wifi disable && adb shell svc wifi enable")
+        print("     adb root && adb shell setprop net.dns1 8.8.8.8")
+        print("")
+        return 2
+    print("")
+    print("✅ 环境自检通过：" + why)
+    print("")
+
     all_tasks = build_tasks(adb, args.serial)
     names = [n.strip() for n in args.tasks.split(",") if n.strip()] or list(all_tasks)
     cfg = yaml.safe_load(Path(args.config).read_text(encoding="utf-8"))
@@ -126,6 +142,11 @@ def main() -> int:
                 "top_action": Counter(actions).most_common(1)[0][0] if actions else "",
             }
             summaries.append(summary)
+
+            # 每个任务跑完立刻擦痕迹。**不能等整批跑完再清**——下一个任务
+            # 一开始就要从干净状态出发，否则会读到上一个任务留下的数据。
+            # 踩过：飞行模式任务把网断了，三个任务之后 Chrome 那条必然失败。
+            cleanup_device(adb, args.serial)
 
             flag = "✅" if success else "❌"
             stuck = f"  卡住({longest}连)" if summary["stuck"] else ""

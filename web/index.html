@@ -1,0 +1,555 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GUI Cascade</title>
+<style>
+:root{
+  --bg:#ffffff; --bg2:#f7f7f5; --bg3:#f0efed;
+  --fg:#1f1e1d; --fg2:#6b6a67; --fg3:#9a9895;
+  --line:#e5e4e1; --line2:#d5d3cf;
+  --accent:#c96442; --accent-soft:#fdf3ef;
+  --small:#3b6fa8; --small-bg:#eef4fb;
+  --large:#a06a10; --large-bg:#fdf6e7;
+  --ok:#2f7d4f; --ok-bg:#edf7f0;
+  --bad:#b03a3a; --bad-bg:#fdeeee;
+  --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+  --radius:10px;
+}
+@media(prefers-color-scheme:dark){:root{
+  --bg:#1f1e1d; --bg2:#262523; --bg3:#2e2c2a;
+  --fg:#f0efed; --fg2:#a5a29e; --fg3:#75726e;
+  --line:#35332f; --line2:#43403b;
+  --accent:#d97757; --accent-soft:#2e2320;
+  --small:#7aabdc; --small-bg:#1d2a37;
+  --large:#d9a441; --large-bg:#302716;
+  --ok:#5dbd85; --ok-bg:#1a2b21;
+  --bad:#e07a7a; --bad-bg:#2e1d1d;
+}}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{
+  background:var(--bg); color:var(--fg);
+  font:15px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+  -webkit-font-smoothing:antialiased;
+}
+button{font:inherit;color:inherit;background:none;border:none;cursor:pointer}
+input,textarea,select{font:inherit;color:inherit}
+
+/* ---------- 顶栏 ---------- */
+.top{
+  height:52px;display:flex;align-items:center;gap:14px;
+  padding:0 18px;border-bottom:1px solid var(--line);background:var(--bg);
+  position:sticky;top:0;z-index:10;
+}
+.brand{font-weight:600;font-size:15px;letter-spacing:-.01em}
+.tabs{display:flex;gap:2px;background:var(--bg3);padding:3px;border-radius:8px}
+.tabs button{padding:5px 15px;border-radius:6px;font-size:13.5px;color:var(--fg2)}
+.tabs button.on{background:var(--bg);color:var(--fg);box-shadow:0 1px 2px #0000000d}
+.spacer{flex:1}
+.dot{width:7px;height:7px;border-radius:50%;background:var(--fg3);display:inline-block;margin-right:6px}
+.dot.ok{background:var(--ok)} .dot.bad{background:var(--bad)}
+.hint{font-size:12.5px;color:var(--fg2)}
+
+/* ---------- 布局 ---------- */
+.page{display:none;height:calc(100vh - 52px)}
+.page.on{display:flex}
+.side{
+  width:236px;flex:none;border-right:1px solid var(--line);
+  background:var(--bg2);padding:12px;display:flex;flex-direction:column;gap:6px;overflow:auto;
+}
+.side .new{
+  width:100%;padding:9px 12px;border-radius:8px;border:1px solid var(--line2);
+  background:var(--bg);text-align:left;font-size:13.5px;color:var(--fg2);
+}
+.side .new:hover{border-color:var(--fg3)}
+.side .lbl{font-size:11px;letter-spacing:.06em;text-transform:uppercase;
+  color:var(--fg3);font-weight:600;margin:12px 0 4px 4px}
+.conv{width:100%;text-align:left;padding:8px 11px;border-radius:7px;font-size:13.5px;
+  color:var(--fg2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.conv:hover{background:var(--bg3)}
+.conv.on{background:var(--bg3);color:var(--fg)}
+
+.main{flex:1;display:flex;flex-direction:column;overflow:hidden}
+.scroll{flex:1;overflow-y:auto;padding:26px 20px 12px}
+.col{max-width:760px;margin:0 auto}
+
+/* ---------- 消息 ---------- */
+.msg{margin-bottom:24px}
+.msg.user .bubble{
+  background:var(--bg2);border:1px solid var(--line);border-radius:var(--radius);
+  padding:11px 15px;font-size:14.5px;
+}
+.msg.bot .who{display:flex;align-items:center;gap:8px;margin-bottom:9px;
+  font-size:12.5px;color:var(--fg3);font-weight:600}
+.msg.bot .who .mark{width:19px;height:19px;border-radius:5px;background:var(--accent);
+  color:#fff;display:grid;place-items:center;font-size:11px;font-weight:700}
+.msg.bot .body{font-size:14.5px;color:var(--fg)}
+
+/* ---------- 执行日志 ---------- */
+.log{border:1px solid var(--line);border-radius:var(--radius);overflow:hidden;margin-top:4px;background:var(--bg)}
+.log>summary{
+  padding:9px 13px;cursor:pointer;font-size:13px;color:var(--fg2);
+  display:flex;align-items:center;gap:9px;list-style:none;background:var(--bg2);
+}
+.log>summary::-webkit-details-marker{display:none}
+.log>summary::before{content:"▸";font-size:11px;color:var(--fg3);transition:.15s}
+.log[open]>summary::before{transform:rotate(90deg)}
+.log .steps{padding:4px 0}
+
+.step{padding:11px 14px;border-top:1px solid var(--line);display:flex;gap:12px}
+.step:first-child{border-top:none}
+.step .idx{font-family:var(--mono);font-size:11.5px;color:var(--fg3);
+  min-width:20px;padding-top:2px}
+.step .mid{flex:1;min-width:0}
+.step .head{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px}
+.chip{font-size:11px;font-weight:600;padding:1.5px 7px;border-radius:20px}
+.chip.small{background:var(--small-bg);color:var(--small)}
+.chip.large{background:var(--large-bg);color:var(--large)}
+.chip.up{background:var(--accent-soft);color:var(--accent)}
+.chip.warn{background:var(--bad-bg);color:var(--bad)}
+.t{font-family:var(--mono);font-size:11px;color:var(--fg3)}
+.step .act{font-family:var(--mono);font-size:12.5px;background:var(--bg2);
+  border:1px solid var(--line);border-radius:6px;padding:6px 9px;
+  word-break:break-all;color:var(--fg);margin-bottom:7px}
+.step .why{font-size:13px;color:var(--fg2);white-space:pre-wrap;
+  max-height:120px;overflow:auto}
+.step details{margin-top:7px}
+.step summary{font-size:11.5px;color:var(--fg3);cursor:pointer}
+.step pre{font-family:var(--mono);font-size:11px;color:var(--fg2);background:var(--bg2);
+  border:1px solid var(--line);border-radius:6px;padding:8px;margin-top:6px;
+  max-height:200px;overflow:auto;white-space:pre-wrap;word-break:break-all}
+.step .shot img{width:104px;border:1px solid var(--line2);border-radius:6px;
+  cursor:zoom-in;display:block;margin-top:2px}
+.step .shot img:hover{border-color:var(--accent)}
+
+.sig{display:flex;gap:12px;margin-top:6px;font-size:11.5px;color:var(--fg3)}
+.sig b{font-family:var(--mono);font-weight:600}
+.sig .fire b{color:var(--accent)}
+
+/* ---------- 结论 ---------- */
+.verdict{margin-top:11px;border-radius:var(--radius);padding:11px 14px;font-size:13.5px;
+  border:1px solid var(--line);display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.verdict.ok{background:var(--ok-bg);border-color:transparent;color:var(--ok)}
+.verdict.no{background:var(--bad-bg);border-color:transparent;color:var(--bad)}
+.verdict.un{background:var(--bg2);color:var(--fg2)}
+.verdict .meta{margin-left:auto;display:flex;gap:14px;font-size:12px;
+  color:var(--fg2);font-family:var(--mono)}
+
+/* ---------- 输入 ---------- */
+.composer{padding:10px 20px 22px;background:var(--bg)}
+.composer .box{max-width:760px;margin:0 auto;border:1px solid var(--line2);
+  border-radius:14px;background:var(--bg);padding:10px 12px;
+  display:flex;gap:10px;align-items:flex-end;transition:.15s}
+.composer .box:focus-within{border-color:var(--fg3);box-shadow:0 0 0 3px #00000008}
+.composer textarea{flex:1;border:none;outline:none;background:none;resize:none;
+  font-size:14.5px;line-height:1.5;max-height:150px;padding:3px 2px}
+.composer textarea::placeholder{color:var(--fg3)}
+.send{width:30px;height:30px;border-radius:8px;background:var(--accent);color:#fff;
+  display:grid;place-items:center;flex:none;font-size:14px}
+.send:disabled{background:var(--line2);cursor:not-allowed}
+.send:hover:not(:disabled){filter:brightness(1.08)}
+
+/* ---------- 评测页 ---------- */
+.evalwrap{flex:1;overflow-y:auto;padding:26px 20px}
+.evalcol{max-width:900px;margin:0 auto}
+.ehead{display:flex;align-items:baseline;gap:12px;margin-bottom:6px}
+.ehead h2{font-size:19px;font-weight:600;letter-spacing:-.01em}
+.ehead p{font-size:13px;color:var(--fg2)}
+.bar{display:flex;gap:10px;align-items:center;margin:18px 0 14px;flex-wrap:wrap;
+  padding:12px 14px;background:var(--bg2);border-radius:var(--radius);border:1px solid var(--line)}
+.bar label{font-size:13px;color:var(--fg2)}
+.bar select{border:1px solid var(--line2);border-radius:7px;padding:5px 9px;
+  background:var(--bg);font-size:13px}
+.bar .run{padding:8px 18px;border-radius:8px;background:var(--accent);color:#fff;
+  font-size:13.5px;font-weight:600}
+.bar .run:disabled{background:var(--line2);cursor:not-allowed}
+
+.tasks{display:grid;gap:8px}
+.task{border:1px solid var(--line);border-radius:var(--radius);padding:12px 15px;
+  display:flex;align-items:center;gap:14px;background:var(--bg)}
+.task:hover{border-color:var(--line2)}
+.task .info{flex:1;min-width:0}
+.task .nm{font-family:var(--mono);font-size:12.5px;color:var(--fg2)}
+.task .ins{font-size:13.5px;margin-top:3px}
+.task .st{font-size:12px;color:var(--fg3);white-space:nowrap}
+.task .go{padding:6px 14px;border-radius:7px;border:1px solid var(--line2);
+  font-size:13px;color:var(--fg2);flex:none}
+.task .go:hover{border-color:var(--accent);color:var(--accent)}
+.task .go:disabled{opacity:.4;cursor:not-allowed}
+.task .res{font-size:12.5px;font-weight:600;padding:3px 9px;border-radius:6px;flex:none}
+.task .res.ok{background:var(--ok-bg);color:var(--ok)}
+.task .res.no{background:var(--bad-bg);color:var(--bad)}
+
+.totals{display:flex;gap:26px;padding:14px 16px;border:1px solid var(--line);
+  border-radius:var(--radius);margin-bottom:16px;background:var(--bg2)}
+.totals .k{font-size:11.5px;color:var(--fg3);text-transform:uppercase;
+  letter-spacing:.06em;font-weight:600}
+.totals .v{font-size:22px;font-weight:600;font-family:var(--mono)}
+
+/* ---------- 灯箱 ---------- */
+#lb{position:fixed;inset:0;background:#000000e0;display:none;
+  align-items:center;justify-content:center;z-index:99;cursor:zoom-out}
+#lb img{max-width:92vw;max-height:92vh;border-radius:8px}
+.empty{text-align:center;color:var(--fg3);padding:80px 20px;font-size:13.5px}
+</style>
+</head>
+<body>
+
+<div class="top">
+  <span class="brand">GUI Cascade</span>
+  <div class="tabs">
+    <button id="tab-chat" class="on">对话</button>
+    <button id="tab-eval">评测</button>
+  </div>
+  <span class="spacer"></span>
+  <span class="hint"><span class="dot" id="dev"></span><span id="devtxt">检查中…</span></span>
+</div>
+
+<!-- ================= 对话 ================= -->
+<div class="page on" id="page-chat">
+  <div class="side">
+    <button class="new" id="newchat">＋ 新对话</button>
+    <div class="lbl">历史</div>
+    <div id="convlist"></div>
+  </div>
+  <div class="main">
+    <div class="scroll" id="chatscroll">
+      <div class="col" id="chatcol">
+        <div class="empty">
+          直接说你要手机做什么，Agent 会一步步操作并汇报。<br>
+          比如「打开设置，把屏幕亮度调到最低」
+        </div>
+      </div>
+    </div>
+    <div class="composer">
+      <div class="box">
+        <textarea id="input" rows="1" placeholder="说点什么…（Enter 发送，Shift+Enter 换行）"></textarea>
+        <button class="send" id="send">↑</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 评测 ================= -->
+<div class="page" id="page-eval">
+  <div class="evalwrap">
+    <div class="evalcol">
+      <div class="ehead">
+        <h2>评测</h2>
+        <p>每个任务自带程序化判分，读的是设备真实状态，不是问模型</p>
+      </div>
+
+      <div class="bar">
+        <label>策略</label>
+        <select id="cfg">
+          <option value="configs/android_cascade_repeat.yaml">级联 · 2B 打底 + 重复检测触发升级</option>
+          <option value="configs/android_small.yaml">全小模型 · 2B（下界基线）</option>
+          <option value="configs/android_large.yaml">全大模型 · 8B（上界基线）</option>
+        </select>
+        <label>步数上限</label>
+        <select id="msteps">
+          <option>8</option><option selected>12</option><option>16</option>
+        </select>
+        <span class="spacer"></span>
+        <button class="run" id="runall">全部跑一遍</button>
+      </div>
+
+      <div class="totals" id="totals" style="display:none">
+        <div><div class="k">完成</div><div class="v" id="t-done">0/0</div></div>
+        <div><div class="k">成功率</div><div class="v" id="t-rate">—</div></div>
+        <div><div class="k">平均步数</div><div class="v" id="t-steps">—</div></div>
+        <div><div class="k">强模型占比</div><div class="v" id="t-esc">—</div></div>
+      </div>
+
+      <div class="tasks" id="tasks"></div>
+      <div style="height:40px"></div>
+    </div>
+  </div>
+</div>
+
+<div id="lb"><img id="lbimg" alt=""></div>
+
+<script>
+const $=s=>document.querySelector(s);
+const esc=s=>String(s??"").replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const api=(p,o)=>fetch(p,o).then(r=>r.json());
+
+// ---------------- 标签切换 ----------------
+$('#tab-chat').onclick=()=>swap('chat');
+$('#tab-eval').onclick=()=>swap('eval');
+function swap(t){
+  for(const k of ['chat','eval']){
+    $('#tab-'+k).classList.toggle('on',k===t);
+    $('#page-'+k).classList.toggle('on',k===t);
+  }
+}
+
+// ---------------- 设备状态 ----------------
+api('/api/tasks').then(d=>{
+  const ok=!d.error && (d.tasks||[]).length>0;
+  $('#dev').className='dot '+(ok?'ok':'bad');
+  $('#devtxt').textContent = ok ? '模拟器在线' : '模拟器不可用';
+  if(!ok) return;
+  renderTasks(d.tasks);
+});
+
+// ================= 对话 =================
+let convs = JSON.parse(localStorage.getItem('gc_convs')||'[]');
+let cur = null;
+let busy = false;
+
+function saveConvs(){ localStorage.setItem('gc_convs', JSON.stringify(convs.slice(0,30))); }
+function renderConvs(){
+  $('#convlist').innerHTML = convs.map(c=>
+    `<button class="conv${c.id===cur?.id?' on':''}" data-id="${c.id}">${esc(c.title||'新对话')}</button>`
+  ).join('');
+  document.querySelectorAll('.conv').forEach(b=>b.onclick=()=>{
+    cur = convs.find(c=>c.id===b.dataset.id);
+    paintConv();
+  });
+}
+function newConv(){
+  cur = {id:Date.now()+'', title:'', msgs:[]};
+  convs.unshift(cur); saveConvs(); renderConvs(); paintConv();
+}
+$('#newchat').onclick=newConv;
+
+function paintConv(){
+  renderConvs();
+  const col=$('#chatcol');
+  if(!cur || !cur.msgs.length){
+    col.innerHTML='<div class="empty">直接说你要手机做什么，Agent 会一步步操作并汇报。<br>比如「打开设置，把屏幕亮度调到最低」</div>';
+    return;
+  }
+  col.innerHTML='';
+  cur.msgs.forEach(m=>appendMsg(m.role, m.html, false));
+  scrollDown();
+}
+function scrollDown(){
+  const s=$('#chatscroll'); s.scrollTop = s.scrollHeight;
+}
+function appendMsg(role, html, animate=true){
+  const col=$('#chatcol');
+  const e=document.querySelector('#chatcol .empty'); if(e) e.remove();
+  const d=document.createElement('div');
+  d.className='msg '+(role==='user'?'user':'bot');
+  d.innerHTML = role==='user'
+    ? `<div class="bubble">${esc(html)}</div>`
+    : `<div class="who"><span class="mark">◆</span>GUI Cascade</div><div class="body">${html}</div>`;
+  col.appendChild(d);
+  if(animate) scrollDown();
+  return d;
+}
+
+if(!convs.length) newConv(); else { cur=convs[0]; }
+paintConv();
+
+// 发送
+const ta=$('#input');
+ta.addEventListener('input',()=>{ ta.style.height='auto'; ta.style.height=Math.min(ta.scrollHeight,150)+'px'; });
+ta.addEventListener('keydown',e=>{
+  if(e.key==='Enter' && !e.shiftKey){ e.preventDefault(); send(); }
+});
+$('#send').onclick=send;
+
+async function send(){
+  const text=ta.value.trim();
+  if(!text || busy) return;
+  ta.value=''; ta.style.height='auto';
+  if(!cur) newConv();
+  if(!cur.title) { cur.title=text.slice(0,28); }
+  cur.msgs.push({role:'user', html:text});
+  saveConvs(); renderConvs();
+  appendMsg('user', text);
+
+  busy=true; $('#send').disabled=true;
+  const bot=appendMsg('bot','<span style="color:var(--fg3)">连接中…</span>');
+  const body=bot.querySelector('.body');
+  let stepsEl=null, logEl=null, n=0, esc_=0;
+
+  try{
+    const r=await api('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({message:text, config:$('#cfg').value, max_steps:+$('#msteps').value, capture_image:true})});
+    if(r.error) throw new Error(r.error);
+    body.innerHTML='';
+    logEl=document.createElement('details'); logEl.className='log'; logEl.open=true;
+    logEl.innerHTML='<summary><span class="ld">正在执行…</span></summary><div class="steps"></div>';
+    body.appendChild(logEl);
+    stepsEl=logEl.querySelector('.steps');
+
+    const es=new EventSource('/api/stream/'+r.run_id);
+    es.onmessage=ev=>{
+      const d=JSON.parse(ev.data);
+      if(d.type==='step'){ n++; if(d.escalated) esc_++; addStep(stepsEl,r.run_id,d); logEl.querySelector('.ld').textContent=`执行过程 · ${n} 步`; scrollDown(); }
+      else if(d.type==='error'){ body.insertBefore(errBox(d.message), logEl); }
+      else if(d.type==='traceback'){ const x=document.createElement('details'); x.innerHTML=`<summary>堆栈</summary><pre>${esc(d.text)}</pre>`; body.appendChild(x); }
+      else if(d.type==='verdict'){ finish(body,d,n,esc_); }
+    };
+    const done=()=>{ es.close(); busy=false; $('#send').disabled=false;
+      cur.msgs.push({role:'bot', html:body.innerHTML}); saveConvs(); };
+    es.addEventListener('close',done); es.onerror=done;
+  }catch(e){
+    body.innerHTML=`<div style="color:var(--bad)">${esc(e.message)}</div>`;
+    busy=false; $('#send').disabled=false;
+  }
+}
+
+function errBox(m){
+  const d=document.createElement('div');
+  d.style.cssText='background:var(--bad-bg);color:var(--bad);padding:10px 13px;border-radius:8px;font-size:13.5px;margin-bottom:9px';
+  d.textContent='⚠️ '+m; return d;
+}
+
+function addStep(host, rid, d){
+  const el=document.createElement('div'); el.className='step';
+  const sig=Object.entries(d.signals||{}).map(([k,v])=>
+    `<span class="${v>=.999?'fire':''}">${k==='stuck'?'卡住':'里程碑'} <b>${(+v).toFixed(2)}</b></span>`).join('');
+  el.innerHTML=`
+    <div class="idx">${String(d.index+1).padStart(2,'0')}</div>
+    <div class="mid">
+      <div class="head">
+        <span class="chip ${d.escalated?'large':'small'}">${d.escalated?'8B 大模型':'2B 小模型'}</span>
+        ${d.escalated?'<span class="chip up">⬆ 升级</span>':''}
+        ${d.format_retries?`<span class="chip warn">重说 ${d.format_retries} 次</span>`:''}
+        <span class="t">模型 ${(+d.latency_model_s).toFixed(2)}s · 环境 ${(+d.latency_env_s).toFixed(2)}s</span>
+      </div>
+      <div class="act">${esc(d.action)}</div>
+      ${d.reason?`<div class="why">${esc(d.reason)}</div>`:''}
+      ${sig?`<div class="sig">${sig}</div>`:''}
+      ${d.screen?`<details><summary>它看到的屏幕</summary><pre>${esc(d.screen)}</pre></details>`:''}
+    </div>
+    ${d.has_shot?`<div class="shot"><img loading="lazy" src="/api/shot/${rid}/${d.index}" onclick="zoom(this.src)"></div>`:''}`;
+  host.appendChild(el);
+}
+
+function finish(body,d,n,escn){
+  const s=d.summary||{};
+  const v=document.createElement('div');
+  if(d.verified===false){
+    v.className='verdict un';
+    v.innerHTML=`<span>未做程序化判分</span><span class="meta">${n} 步 · 8B ${escn}/${n}</span>`;
+    const note=document.createElement('div');
+    note.style.cssText='font-size:12.5px;color:var(--fg3);margin-top:7px;width:100%';
+    note.textContent=d.note||'';
+    v.appendChild(note);
+  }else{
+    const ok=d.success;
+    v.className='verdict '+(ok?'ok':'no');
+    v.innerHTML=`<span>${ok?'✅ 任务成功':'❌ 任务失败'}</span>
+      <span class="meta">${s.steps??n} 步 · 8B ${escn}/${n} · 模型 ${(s.latency_model_s??0).toFixed(1)}s / 环境 ${(s.latency_env_s??0).toFixed(1)}s</span>`;
+  }
+  body.appendChild(v); scrollDown();
+}
+
+function zoom(src){ $('#lbimg').src=src; $('#lb').style.display='flex'; }
+$('#lb').onclick=()=>$('#lb').style.display='none';
+
+// ================= 评测 =================
+let tasks=[], results={}, running=false;
+
+function renderTasks(list){
+  tasks=list;
+  // 按来源分组：我们自己编的 / AndroidWorld 的。
+  // **分开列是有意义的**——两边判分的可信度不一样：
+  // AndroidWorld 的判分是别人在真机上反复调过的，我们的翻过四次车。
+  const groups=[
+    ['ours','我们的任务','判分写在 android_tasks.py，简单直接'],
+    ['androidworld','AndroidWorld','Google 的公开 benchmark，判分是它原版代码'],
+  ];
+  let html='';
+  for(const [src,title,sub] of groups){
+    const g=list.filter(t=>t.source===src);
+    if(!g.length) continue;
+    html+=`<div style="margin:18px 0 8px">
+      <div style="font-size:14px;font-weight:600">${title}
+        <span style="font-size:12px;color:var(--fg3);font-weight:400">·
+        ${g.length} 个 · ${sub}</span></div></div>`;
+    html+=g.map(t=>`
+      <div class="task" data-n="${esc(t.name)}">
+        <div class="info">
+          <div class="nm">${esc(t.label||t.name)}</div>
+          <div class="ins">${esc(t.instruction)}</div>
+        </div>
+        <span class="st">${t.steps_hint[0]}~${t.steps_hint[1]} 步</span>
+        <span class="res" style="display:none"></span>
+        <button class="go">运行</button>
+      </div>`).join('');
+  }
+  $('#tasks').innerHTML=html;
+  document.querySelectorAll('.task .go').forEach(b=>{
+    b.onclick=()=>runOne(b.closest('.task'));
+  });
+}
+
+async function runOne(el){
+  if(running) return;
+  running=true;
+  document.querySelectorAll('.task .go').forEach(b=>b.disabled=true);
+  const name=el.dataset.n;
+  const res=el.querySelector('.res');
+  res.style.display='none';
+  el.querySelector('.go').textContent='运行中…';
+
+  try{
+    const r=await api('/api/run',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({task:name, config:$('#cfg').value, max_steps:+$('#msteps').value, capture_image:true})});
+    if(r.error) throw new Error(r.error);
+
+    // 在结果区就地长出一条执行日志
+    let host=el.querySelector('.log');
+    if(!host){ host=document.createElement('div'); host.style.cssText='flex-basis:100%';
+      el.style.flexWrap='wrap'; el.appendChild(host); }
+    host.innerHTML='<details class="log" open><summary><span class="ld">执行中…</span></summary><div class="steps"></div></details>';
+    const det=host.querySelector('details'), steps=det.querySelector('.steps');
+    let n=0, escn=0, verdict=null;
+
+    await new Promise(done=>{
+      const es=new EventSource('/api/stream/'+r.run_id);
+      es.onmessage=e=>{
+        const d=JSON.parse(e.data);
+        if(d.type==='step'){ n++; if(d.escalated) escn++; addStep(steps,r.run_id,d); det.querySelector('.ld').textContent=`执行过程 · ${n} 步`; }
+        else if(d.type==='error'){ host.insertBefore(errBox(d.message), det); }
+        else if(d.type==='verdict'){ verdict=d; }
+      };
+      const end=()=>{ es.close(); done(); };
+      es.addEventListener('close',end); es.onerror=end;
+    });
+
+    const ok = verdict && verdict.success;
+    res.className='res '+(ok?'ok':'no');
+    res.textContent= ok?'成功':'失败';
+    res.style.display='';
+    results[name]={ok, steps:n, esc:escn};
+    updateTotals();
+  }catch(e){
+    res.className='res no'; res.textContent='错误'; res.style.display='';
+    el.insertAdjacentHTML('beforeend',
+      `<div style="flex-basis:100%"><div style="color:var(--bad);font-size:13px">${esc(e.message)}</div></div>`);
+  }
+  el.querySelector('.go').textContent='运行';
+  running=false;
+  document.querySelectorAll('.task .go').forEach(b=>b.disabled=false);
+}
+
+$('#runall').onclick=async()=>{
+  for(const el of document.querySelectorAll('.task')){ await runOne(el); }
+};
+
+function updateTotals(){
+  const ks=Object.keys(results);
+  if(!ks.length) return;
+  $('#totals').style.display='flex';
+  const ok=ks.filter(k=>results[k].ok).length;
+  const steps=ks.reduce((a,k)=>a+results[k].steps,0);
+  const esc=ks.reduce((a,k)=>a+results[k].esc,0);
+  const total=steps;
+  $('#t-done').textContent=`${ks.length}/${tasks.length}`;
+  $('#t-rate').textContent=`${Math.round(ok/ks.length*100)}%`;
+  $('#t-steps').textContent=(steps/ks.length).toFixed(1);
+  $('#t-esc').textContent= total? `${Math.round(esc/total*100)}%` : '—';
+}
+</script>
+</body>
+</html>

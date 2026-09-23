@@ -267,6 +267,18 @@ class AndroidEnv:
         """
         return self._run("exec-out", "screencap", "-p", timeout=30)
 
+    dump_retries: int = 2
+    """`uiautomator dump` 失败时重试几次。
+
+    ⚠️ **必须有这个重试。** `uiautomator dump` 在模拟器上会偶发超时
+    （实测踩过：`TimeoutExpired` 直接冒泡出去，**把整条 episode 打死**，
+    前面十几步全白跑）。
+
+    它只是个瞬时抖动——重试一次基本就好。把一个可恢复的环境抖动
+    升级成任务失败，是最不划算的一种失败：数据里看不出区别，
+    只表现为"模型成功率莫名偏低"。
+    """
+
     def ui_elements(self, *, fresh: bool = False) -> list[dict[str, Any]]:
         """无障碍树里的元素列表。默认走缓存，见 `elements_ttl`。"""
         now = time.monotonic()
@@ -274,11 +286,28 @@ class AndroidEnv:
                 and now - self._elements_at < self.elements_ttl):
             return self._elements
 
-        self._run("shell", "uiautomator", "dump", _DEVICE_XML, timeout=30)
-        raw = self._run("shell", "cat", _DEVICE_XML, timeout=30).decode("utf-8", "replace")
-        self._elements = _parse_ui_xml(raw)
-        self._elements_at = time.monotonic()
-        return self._elements
+        # 重试只针对 dump 这一段。**解析失败不重试**——那说明 dump 出来的
+        # 内容本身有问题（比如屏幕上有动画、拿到半截 XML），重试也一样。
+        last: Exception | None = None
+        for attempt in range(self.dump_retries + 1):
+            try:
+                self._run("shell", "uiautomator", "dump", _DEVICE_XML, timeout=30)
+                raw = self._run("shell", "cat", _DEVICE_XML, timeout=30).decode("utf-8", "replace")
+                els = _parse_ui_xml(raw)
+                if els:
+                    self._elements = els
+                    self._elements_at = time.monotonic()
+                    return self._elements
+                last = RuntimeError("dump 解析出来是空的")
+            except Exception as e:  # noqa: BLE001 - 超时、adb 断连都算
+                last = e
+            if attempt < self.dump_retries:
+                time.sleep(1.0 + attempt)
+
+        raise RuntimeError(
+            f"uiautomator dump 连续 {self.dump_retries + 1} 次失败：{last}。"
+            "模拟器可能卡住了，考虑 `adb reboot`。"
+        )
 
     def actionable(self) -> list[dict[str, Any]]:
         """模型能操作的元素列表——**和 `_observe` 渲染出去的必须是同一份**。
