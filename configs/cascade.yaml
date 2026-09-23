@@ -1,0 +1,64 @@
+# 级联配置：小模型打底，监控器触发时升级。
+#
+# 这是本项目的主配置。改这里就能换模型、换监控器、换阈值——不用动 Python。
+#
+# 嵌套部件的类别由字段名推断，不用手写（见 registry.py 的 _FIELD_KINDS）：
+#   small / large / router  ->  policy
+#   model                   ->  model
+#   stuck / milestone       ->  monitor
+#   verifier                ->  model
+
+policy:
+  type: cascade
+
+  small:
+    type: single
+    label: small
+    action_space:
+      type: android
+    max_history: 6              # 和官方监控器窗口对齐，两边看到的东西一致
+    model:
+      type: openai_compat
+      name: qwen3-vl-2b
+      base_url: http://10.201.126.245:8000/v1
+      temperature: 0.0
+
+  large:
+    type: single
+    label: large
+    action_space:
+      type: android
+    max_history: 6
+    model:
+      type: openai_compat
+      name: qwen3-vl-8b-thinking
+      base_url: http://10.201.126.245:8001/v1
+      temperature: 0.0
+
+  router:
+    type: cascade_router
+
+    # ⚠️ 阈值不要用默认的 0.5。
+    # 实测发现官方发布的监控器在推理时对英文 GUI 轨迹恒定输出 0（见 README），
+    # 这两个数必须按自己的数据重新校准（scripts/calibrate_thresholds.py）。
+    theta_stuck: 0.50
+    theta_milestone: 0.50
+    min_steps: 2                # 头两步不判：轨迹太短，打分基本是噪声
+    hold_steps: 1               # 升级后至少再走 1 步大模型，避免大小模型来回横跳
+
+    stuck:
+      type: bert
+      model_path: models/stuck-detector
+      threshold: 0.50
+
+    milestone:
+      type: bert
+      model_path: models/milestone-detector
+      threshold: 0.50
+
+    # 里程碑验证器：唯一的昂贵调用，用大模型对比前后截图
+    verifier:
+      type: openai_compat
+      name: qwen3-vl-8b-thinking
+      base_url: http://10.201.126.245:8001/v1
+      temperature: 0.0

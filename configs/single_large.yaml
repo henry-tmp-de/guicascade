@@ -1,0 +1,17 @@
+# 上界基线：全程大模型。
+#
+# 和 cascade.yaml 唯一的区别就是 policy 段。**主循环、日志、统计口径完全一样**
+# ——这是三组对照能直接比较的前提。
+
+policy:
+  type: single
+  label: large
+  action_space:
+    type: android
+  is_strong: true      # 标记"这一步用的是强模型"，三组对照靠它统一口径
+  max_history: 6
+  model:
+    type: openai_compat
+    name: qwen3-vl-8b-thinking
+    base_url: http://10.201.126.245:8001/v1
+    temperature: 0.0

@@ -1,0 +1,15 @@
+# 下界基线：全程小模型。
+#
+# 和 single_large.yaml 只差一个模型名——三组对照共用同一套代码路径。
+
+policy:
+  type: single
+  label: small
+  action_space:
+    type: android
+  max_history: 6
+  model:
+    type: openai_compat
+    name: qwen3-vl-2b
+    base_url: http://10.201.126.245:8000/v1
+    temperature: 0.0
