@@ -1,0 +1,42 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+/build/
+/dist/
+.venv/
+/venv/
+.env
+
+# ---- 实验产物 ----
+/results/
+/runs/
+*.jsonl
+!tests/fixtures/**/*.jsonl
+trace*.json
+
+# ---- 模型权重（太大，不入库）----
+/models/
+*.safetensors
+*.bin
+*.pt
+*.pth
+
+# ---- 数据 ----
+/data/
+/datasets/
+*.parquet
+
+# ---- 编辑器 / 系统 ----
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*.log
+
+# ---- 本地记录（不上云）----
+# 完整的监控器实测记录、数据来源、未决问题，留给后续调整用
+LOCAL-NOTES.md
+LOCAL-*.md
+docs/local/

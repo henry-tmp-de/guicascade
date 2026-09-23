@@ -1,0 +1,53 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "guicascade"
+version = "0.1.0"
+description = "A minimal, pluggable GUI agent framework with step-level cascade routing"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+keywords = ["gui-agent", "agent", "cascade", "llm", "android", "osworld"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+]
+
+# 核心刻意保持极少：跑一个纯文本/回放环境只需要 pyyaml。
+dependencies = [
+    "pyyaml>=6.0",
+    "pillow>=10.0",
+]
+
+[project.optional-dependencies]
+# 本地跑 ModernBERT 监控器
+monitors = [
+    "torch>=2.1",
+    "transformers>=4.48",
+]
+# 调用 OpenAI 兼容的模型服务（vLLM / 常驻推理服务 / 云端 API）
+openai = ["openai>=1.40", "httpx>=0.27"]
+# 安卓真机 / 模拟器环境
+android = ["requests>=2.31"]
+# 本地开发
+dev = ["pytest>=8.0", "ruff>=0.6"]
+
+[project.scripts]
+guicascade = "guicascade.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
