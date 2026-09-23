@@ -1,0 +1,57 @@
+# 级联（只开卡住那一路）—— 本机跑三臂对照用。
+#
+# 和 `android_cascade.yaml` 的差别只有一处：**没有 milestone 那一路**。
+#
+# 为什么：里程碑 BERT 的权重（149M）在 GPU 服务器的
+# `/home/ziru/guicascade/models/milestone-detector` 上，本机没有，
+# 也不想为了跑个对照实验去下一份 600MB 的权重进仓库。
+#
+# 摘掉它换来一个**更干净的实验**：这一路只剩"重复就升级"，
+# 那么对照结果里任何差异都只能归因到它，不会和里程碑的判断混在一起。
+# 想验证“卡住监控器的替代方案到底管不管用”，本来就该这么单独测。
+#
+# ⚠️ 结论的适用范围要跟着收窄：**这份配置测不出里程碑那一路的贡献**。
+# 要测那个得连服务器上的权重一起跑，见 android_cascade.yaml。
+
+policy:
+  type: cascade
+
+  small:
+    type: single
+    label: small
+    is_strong: false
+    action_space: {type: android}
+    max_history: 6
+    include_image: false
+    model:
+      type: openai_compat
+      name: qwen3-vl-2b
+      base_url: http://10.201.126.245:8000/v1
+      temperature: 0.0
+      max_tokens: 512
+
+  large:
+    type: single
+    label: large
+    is_strong: true
+    action_space: {type: android}
+    max_history: 6
+    include_image: false
+    model:
+      type: openai_compat
+      name: qwen3-vl-8b
+      base_url: http://10.201.126.245:8001/v1
+      temperature: 0.0
+      max_tokens: 512
+
+  router:
+    type: cascade_router
+    theta_stuck: 1.0          # 和 min_repeats=3 配套，见 android_cascade.yaml 的说明
+    min_steps: 2
+    hold_steps: 1             # 升级后至少再用 1 步大模型，免得刚叫醒就被踢回去
+
+    stuck:
+      type: repeat
+      mode: streak
+      min_repeats: 3
+      window: 6
