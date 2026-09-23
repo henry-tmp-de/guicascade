@@ -1,0 +1,62 @@
+# 应用显示名 -> 包名。**这是设备相关的数据，不是源码。**
+#
+# 由 scripts/scan_apps.py 自动扫描生成，换设备/换镜像必须重扫：
+#     python scripts/scan_apps.py --out configs/apps.yaml
+#
+# ⚠️ 这张表**绝不能进提示词**。模型只负责说应用名，查表是环境的事。
+#    写进提示词的后果是模型不再看屏幕、直接查表，benchmark 退化成查表题——
+#    我们踩过这个坑，整轮三臂对照的数据因此作废。
+#
+# 表本身是必需的：「设置」对应哪个包是**设备的事实**，推不出来。
+# 它属于环境配置而不是源码，正是因为它会随设备变。
+
+apps:
+  # ---- 扫描器自动确认的 ----
+  Calendar: com.google.android.calendar
+  Camera: com.android.camera2
+  Chrome: com.android.chrome
+  Clock: com.google.android.deskclock
+  Contacts: com.google.android.contacts
+  Files: com.google.android.documentsui
+  Gmail: com.google.android.gm
+  Google: com.google.android.googlequicksearchbox
+  Maps: com.google.android.apps.maps
+  Messages: com.google.android.apps.messaging
+  Phone: com.google.android.dialer
+  Photos: com.google.android.apps.photos
+  Settings: com.android.settings
+  TMoble: com.android.stk
+  YouTube: com.google.android.youtube
+
+  # ---- 下面这条是手工补的 ----
+  # 扫描器点它时，首次启动会弹欢迎/登录对话框挡住真正的界面，轮询超时。
+  # 扫描器会把这种漏掉的应用**明确列出来**而不是猜一个——猜错的名字
+  # 比缺失更糟（模型会拿着错的包名去启动，然后困惑为什么没反应）。
+  # 这两个包名不是猜的：它们出现在 `query-activities` 报的启动器入口列表里，
+  # 只是扫描时没能在抽屉里对上号。核对过才写进来的。
+  Drive: com.google.android.apps.docs
+  YT Music: com.google.android.apps.youtube.music
+
+  # ---- 中文别名（手工维护）----
+  # 任务是中文写的，模型大概率会说「时钟」而不是「Clock」。
+  # 设备是英文 locale，抽屉里扫出来的标签全是英文，所以这层映射补不上，
+  # 只能手工写。**换语言的任务集要同步维护这里。**
+  时钟: com.google.android.deskclock
+  闹钟: com.google.android.deskclock
+  设置: com.android.settings
+  联系人: com.google.android.contacts
+  相机: com.android.camera2
+  相册: com.google.android.apps.photos
+  图库: com.google.android.apps.photos
+  文件: com.google.android.documentsui
+  文件管理: com.google.android.documentsui
+  日历: com.google.android.calendar
+  地图: com.google.android.apps.maps
+  信息: com.google.android.apps.messaging
+  短信: com.google.android.apps.messaging
+  电话: com.google.android.dialer
+  浏览器: com.android.chrome
+  # 注意：**这台镜像上没有装计算器**。别往这里加
+  # `计算器: com.google.android.calculator` —— 那是凭印象写的包名，
+  # 在这台机器上不存在，模型照抄之后一步都走不动。
+  # 要加先 `adb shell cmd package query-activities ...` 确认它真的在。

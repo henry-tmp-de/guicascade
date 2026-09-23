@@ -36,7 +36,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from guicascade.agent import Agent  # noqa: E402
-from guicascade.envs.android import AndroidEnv, find_adb  # noqa: E402
+from guicascade.envs.android import AndroidEnv, find_adb, load_apps  # noqa: E402
 from guicascade.registry import build  # noqa: E402
 from guicascade.tools import FinishTool, NoteTool, Toolkit  # noqa: E402
 
@@ -87,7 +87,7 @@ def main() -> int:
             tag = f"{name}" + (f"_r{rep}" if args.repeat > 1 else "")
             policy = build("policy", cfg["policy"])       # 每个 episode 重建，状态归零
             env = AndroidEnv(serial=args.serial, adb=adb, task_package=task.package,
-                             capture_image=not args.no_image)
+                             apps=load_apps(), capture_image=not args.no_image)
             toolkit = Toolkit().add(NoteTool()).add(FinishTool())
             agent = Agent(env, policy, toolkit=toolkit, max_steps=args.max_steps)
 
