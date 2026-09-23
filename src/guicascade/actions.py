@@ -292,9 +292,20 @@ def _extract_payload(text: str) -> str:
       3. 整段里最后一个 {...} —— 兜底，通常是对的那个
       4. 整段文本           —— 可能是裸的 call 语法
     """
-    m = _ACTION_LINE.search(text)
-    if m:
-        return m.group(1).strip()
+    # ⚠️ 取**最后**一个 `Action:` 行，不是第一个。
+    #
+    # 模型经常先复述上一步做了什么、再给出这一步的决定：
+    #
+    #     ...上一步 Action: open_app(app_name='com.android.settings') 已生效...
+    #     最终判断：已打开设置。
+    #     Action: finish(reason='...')          <- 这才是它想做的
+    #
+    # 取第一个的话，模型永远在原地执行旧动作——**看起来像模型卡住了，
+    # 其实是解析器把它锁死了**。实测踩过：模型第 3 步就想收工，
+    # 却被按着头把 open_app 重复到第 8 步。
+    matches = list(_ACTION_LINE.finditer(text))
+    if matches:
+        return matches[-1].group(1).strip()
 
     m = _JSON_FENCE.search(text)
     if m:

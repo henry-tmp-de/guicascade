@@ -202,7 +202,14 @@ class FinishTool:
     finished: bool = False
     summary: str = ""
 
-    def run(self, summary: str = "", **_: Any) -> "ToolResult":
+    def run(self, summary: str = "", reason: str = "", **_: Any) -> "ToolResult":
+        """`reason` 是 `summary` 的别名。
+
+        参数名对不上是常有的事——模型会按自己的习惯叫它 `reason`、`explanation`
+        等等。**为了一个名字把"任务完成"这个关键信号丢掉，代价太大**，
+        所以这里主动收下几个常见叫法，而不是让它报参数错误然后重试一轮。
+        """
+        text = summary or reason
         self.finished = True
-        self.summary = summary
-        return ToolResult(f"任务已标记为完成：{summary}", done=True)
+        self.summary = text
+        return ToolResult(f"任务已标记为完成：{text}", done=True)

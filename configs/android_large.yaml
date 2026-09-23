@@ -1,0 +1,14 @@
+# 安卓环境 + 单模型（大）。上界基线，也用来产生"有成功"的轨迹。
+policy:
+  type: single
+  label: large
+  is_strong: true
+  action_space: {type: android}
+  max_history: 6
+  include_image: false
+  model:
+    type: openai_compat
+    name: qwen3-vl-8b
+    base_url: http://10.201.126.245:8001/v1
+    temperature: 0.0
+    max_tokens: 512

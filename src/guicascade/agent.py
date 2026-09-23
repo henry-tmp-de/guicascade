@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import time
 
+from .actions import DecodeError
 from .envs.base import Environment
 from .policies import Policy
 from .tools import Toolkit
@@ -74,7 +75,16 @@ class Agent:
 
             for index in range(self.max_steps):
                 # —— 策略侧：这一步用哪个模型、做什么 ——
-                decision = self.policy.act(task, observation, trajectory.steps)
+                try:
+                    decision = self.policy.act(task, observation, trajectory.steps)
+                except DecodeError as e:
+                    # 模型连着几次都说不出一个合法动作 -> 这条轨迹到此为止。
+                    #
+                    # **判负而不是抛异常**：批量跑实验时，一个任务把整批带崩
+                    # 是不可接受的——前面几十条轨迹都白跑了。GUI agent 本来就
+                    # 会失败，把"说不清动作"也当成一种失败记下来就好。
+                    trajectory.meta["abort_reason"] = f"格式解析失败：{e}"
+                    break
 
                 # —— 执行侧：按动作类型分派 ——
                 step = self._execute(index, observation, decision)

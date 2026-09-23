@@ -100,7 +100,20 @@ class AndroidEnv:
     """`reset` 时是否先回桌面。起点不确定会让不同 run 之间没法比较。"""
 
     step_wait: float = 0.6
-    """每个动作之后的固定等待。界面动画没结束就截图，拿到的是中间态。"""
+    """普通动作（点击、滑动）之后的等待。"""
+
+    launch_wait: float = 3.0
+    """启动 app 之后的等待。**比普通动作长得多，这个差别很关键。**
+
+    启动一个 app 要 1~3 秒才把界面画出来，而点击只要几百毫秒。
+    如果统一用 0.6 秒，`open_app` 之后拿到的还是**上一个界面**——
+    模型会以为自己的动作没生效，于是原地重试同一动作，
+    看起来像"模型卡住了"，实际是**环境返回得太早**。
+
+    实测踩过：模型第一步就用 open_app 成功打开了设置，但因为看到的还是
+    桌面，它把同一个动作重复了 8 次。那条轨迹被标成"卡住"，
+    但根因在环境不在模型——**这种假样本会污染监控器的评测集。**
+    """
 
     max_elements: int = 60
     """无障碍树里最多渲染多少个元素。全量渲染会长到几千字符，把提示词撑爆，
@@ -221,7 +234,9 @@ class AndroidEnv:
     def step(self, action: Action) -> StepResult:
         try:
             self._dispatch(action)
-            time.sleep(self.step_wait)
+            # 启动类动作要多等：界面还没画出来就取观察，等于让模型看旧屏幕
+            wait = self.launch_wait if action.name == "open_app" else self.step_wait
+            time.sleep(wait)
             ok, error = True, ""
         except Exception as e:  # noqa: BLE001 - 动作失败是常态，不该中断 episode
             ok, error = False, f"{type(e).__name__}: {e}"
@@ -519,10 +534,35 @@ def android_action_space() -> ActionSpace:
     ))
     _add(ActionSpec(
         name="open_app",
-        description="通过包名启动一个 app。只在任务需要切换 app 时使用。",
+        description=(
+            "直接按包名启动一个 app。**这是打开 app 最快、最可靠的方式**，"
+            "优先用它，不要去桌面上找图标——很多 app 的图标并不在桌面第一页，"
+            "在桌面上滚动或搜索往往要试很多步，而且容易卡住。"
+            "只要你能确定目标 app 的包名，就用这个动作一步到位。"
+        ),
         parameters={
             "type": "object",
-            "properties": {"app_name": {"type": "string", "description": "app 的包名，如 com.android.settings"}},
+            "properties": {
+                "app_name": {
+                    "type": "string",
+                    # ⚠️ 这些包名是在 Pixel 6 / API 33 这个具体镜像上
+                    # 用 `adb shell pm list packages` 查出来的，不是猜的。
+                    # 第一版写的 com.android.deskclock / com.android.contacts
+                    # 在这个镜像上根本不存在，模型照抄之后一步都走不动。
+                    # **换镜像时这张表必须重新查。**
+                    "description": (
+                        "app 的包名。常用："
+                        "com.android.settings=设置，"
+                        "com.google.android.contacts=联系人，"
+                        "com.google.android.deskclock=时钟，"
+                        "com.android.camera2=相机，"
+                        "com.google.android.documentsui=文件管理，"
+                        "com.google.android.calendar=日历，"
+                        "com.google.android.apps.maps=地图，"
+                        "com.google.android.apps.messaging=信息"
+                    ),
+                },
+            },
             "required": ["app_name"],
         },
         positional=("app_name",),

@@ -17,7 +17,7 @@ import time
 from dataclasses import dataclass, field, replace
 from typing import Protocol, Sequence, runtime_checkable
 
-from .actions import ActionSpace, decode
+from .actions import ActionSpace, DecodeError, decode
 from .models.base import Message, Model
 from .prompts import STEP_TEMPLATE, SYSTEM_TEMPLATE, render_episode
 from .router import CascadeRouter, Router
@@ -86,6 +86,23 @@ class SingleModelPolicy:
     max_history: int = 6
     """历史里带多少步。默认 6 和监控器的窗口对齐，两边看到的东西一致。"""
 
+    max_format_retries: int = 2
+    """解析失败时，最多让模型重说几次。
+
+    **这是解析层最重要的一道保险。** 解析器可以把 `click(3)`、JSON、键值对
+    这些常见写法都兜住，但模型的表达方式是无穷的——靠加正则去打地鼠永远打不完。
+    真正的解法是**把错误喂回去让它自己改**：
+
+        模型: "我看到设置图标，应该点它。\\n下一步：点击设置"
+        框架: "没能从你的回复里看出动作。请按 Action: 动作名(参数=值) 的格式重写。"
+        模型: "Action: click(index=7)"        ← 改对了
+
+    实测这个机制救回了不少步。代价是失败时多花一两次模型调用——比丢掉
+    整条轨迹便宜得多。
+
+    重试仍失败则抛错，由上层决定怎么处理（见 `Agent` 的说明）。
+    """
+
     include_image: bool = False
     """要不要把截图一并发给模型。
 
@@ -123,20 +140,37 @@ class SingleModelPolicy:
             {"role": "user", "content": self._content(task, observation, history, extra)},
         ]
 
-        t0 = time.perf_counter()
-        response = self.model.generate(messages)
-        latency = time.perf_counter() - t0
+        latency = 0.0
+        last_error: DecodeError | None = None
 
-        reason, action = decode(response, self.action_space, self.toolkit)
+        for attempt in range(self.max_format_retries + 1):
+            t0 = time.perf_counter()
+            response = self.model.generate(messages)
+            latency += time.perf_counter() - t0
 
-        return Decision(
-            reason=reason,
-            action=action,
-            model=self.label,
-            raw=response.text,
-            latency_s=latency,
-            escalated=self.is_strong,
-        )
+            try:
+                reason, action = decode(response, self.action_space, self.toolkit)
+            except DecodeError as e:
+                last_error = e
+                if attempt == self.max_format_retries:
+                    break
+                # 把模型说的原话和解析器的抱怨一起喂回去——只说"格式不对"它
+                # 不知道自己错在哪，看到自己的输出才有得改
+                messages.append({"role": "assistant", "content": response.text})
+                messages.append({"role": "user", "content": str(e)})
+                continue
+
+            return Decision(
+                reason=reason,
+                action=action,
+                model=self.label,
+                raw=response.text,
+                latency_s=latency,
+                escalated=self.is_strong,
+                format_retries=attempt,
+            )
+
+        raise last_error if last_error else DecodeError("解析失败")
 
     # ------------------------------------------------------------------
 

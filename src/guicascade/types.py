@@ -150,6 +150,14 @@ class Decision:
     signals: Mapping[str, float] = field(default_factory=dict)
     """这一步各路监控器打的分，如 {"stuck": 0.08, "milestone": 0.71}。"""
 
+    format_retries: int = 0
+    """这一步重说了几次才给出合法动作。
+
+    这个数值得盯着：**它是解析层健康度的直接指标**。如果平均接近 1，
+    说明提示词的输出格式没说清楚，或者模型能力不够；
+    如果经常顶到上限，说明这条轨迹快废了。
+    """
+
     escalated: bool = False
     """这一步是否由**强模型**执行。
 
@@ -220,6 +228,7 @@ class Step:
             "reason": self.decision.reason,
             "action": str(self.decision.action),
             "escalated": self.decision.escalated,
+            "format_retries": self.decision.format_retries,
             "latency_model_s": round(self.decision.latency_s, 4),
             "latency_env_s": round(self.latency_env_s, 4),
         }
