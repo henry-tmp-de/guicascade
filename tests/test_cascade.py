@@ -20,6 +20,7 @@ from guicascade.actions import ActionSpace, ActionSpec
 from guicascade.agent import Agent
 from guicascade.envs.scripted import ScriptedEnvironment
 from guicascade.models.scripted import ScriptedModel
+from guicascade.monitors.repeat import RepeatMonitor
 from guicascade.policies import CascadePolicy, SingleModelPolicy
 from guicascade.router import CascadeRouter
 from guicascade.types import Step
@@ -213,3 +214,102 @@ def test_router_reset_between_tasks(space: ActionSpace) -> None:
     assert router._hold_left >= 0
     run(space, policy, max_steps=3)
     assert router._last_milestone_idx == 0   # 归零了
+
+
+# --------------------------------------------------------------------------
+# 用**真的** RepeatMonitor 跑通级联 —— 前面那些测试用的是 FakeMonitor，
+# 只验证了路由逻辑；这一组验证的是"数重复"这个真家伙接进去确实管用。
+# --------------------------------------------------------------------------
+
+
+def make_repeat_cascade(space, small_script, large_script, *, min_repeats=3):
+    """用真 RepeatMonitor 装配一条级联。
+
+    `theta_stuck` 取 1.0 而不是 0.5——这是**必须**的：RepeatMonitor 打的是
+    `重复次数 / min_repeats`，取 0.5 的话 2/3 = 0.667 就过线了，
+    配置写着 3 次实际 2 次就触发。这个联动关系很容易配错，
+    所以专门用下面那条测试把它钉死。
+    """
+    small = SingleModelPolicy(ScriptedModel("small", small_script), space, label="small")
+    large = SingleModelPolicy(ScriptedModel("large", large_script), space,
+                              label="large", is_strong=True)
+    router = CascadeRouter(
+        stuck=RepeatMonitor(mode="streak", min_repeats=min_repeats),
+        theta_stuck=1.0,
+        min_steps=2,
+        hold_steps=0,
+    )
+    return CascadePolicy(small, large, router=router)
+
+
+def test_repeat_monitor_escalates_on_the_third_identical_action(space: ActionSpace) -> None:
+    """小模型把同一个动作做满 3 遍 -> 第 4 步换大模型。
+
+    这是"卡住监控器换成数重复"这个决定的端到端验证：
+    输入是一串真实的模型输出文本，走的是真实的解析、真实的路由。
+    """
+    policy = make_repeat_cascade(
+        space,
+        ["Action: click(index=1)"] * 10,   # 小模型只会这一招，原地打转
+        ["Action: click(index=2)"],        # 大模型上来就换了个动作
+    )
+    traj = run(space, policy, max_steps=6)
+    models = [s.model for s in traj.steps]
+
+    assert models[:3] == ["small"] * 3, "前 3 步：重复还没攒够，不该升级"
+    assert models[3] == "large", "第 4 步：已经重复 3 次，必须升级"
+    assert traj.steps[3].decision.signals["stuck"] == 1.0
+
+
+def test_threshold_two_escalates_one_step_earlier(space: ActionSpace) -> None:
+    """`min_repeats` 改成 2，就应该早一步触发。
+
+    单纯"能触发"不足以证明参数生效——必须证明**它改变的是触发时机**。
+    这个测试也顺带锁住了 `theta_stuck` 与 `min_repeats` 的联动：
+    哪天有人把 theta 改回 0.5，这条会因为提前一步而失败。
+    """
+    policy = make_repeat_cascade(
+        space,
+        ["Action: click(index=1)"] * 10,
+        ["Action: click(index=2)"],
+        min_repeats=2,
+    )
+    models = [s.model for s in run(space, policy, max_steps=6).steps]
+
+    assert models[:2] == ["small"] * 2
+    assert models[2] == "large", "min_repeats=2 时第 3 步就该升级"
+
+
+def test_varying_actions_never_escalate(space: ActionSpace) -> None:
+    """动作每步都不一样就永远不升级 —— 级联的收益全靠这一条。
+
+    如果这个测试挂了，说明监控器在正常轨迹上乱报警，级联就退化成了
+    "大部分时候都在用大模型"，省钱的初衷直接落空。
+    """
+    policy = make_repeat_cascade(
+        space,
+        [f"Action: click(index={i})" for i in range(1, 9)],
+        ["Action: click(index=99)"],
+    )
+    traj = run(space, policy, max_steps=6)
+
+    assert traj.n_escalated == 0
+    assert all(s.model == "small" for s in traj.steps)
+
+
+def test_alternating_actions_are_invisible_to_streak_mode(space: ActionSpace) -> None:
+    """连击模式的**已知盲区**，用测试把它记下来而不是假装没有。
+
+    `click(1) click(2) click(1) click(2) ...` 显然也是卡住，
+    但末尾连击永远只有 1，streak 模式抓不到。想抓这种得换 `mode="count"`。
+    写这条测试不是认可这个行为，是**让盲区可见**——将来谁要用 streak 模式，
+    跑一遍测试就知道它漏什么。
+    """
+    policy = make_repeat_cascade(
+        space,
+        ["Action: click(index=1)", "Action: click(index=2)"] * 5,
+        ["Action: click(index=99)"],
+    )
+    traj = run(space, policy, max_steps=6)
+
+    assert traj.n_escalated == 0, "连击模式对交替打转确实无感（这是它的盲区）"
