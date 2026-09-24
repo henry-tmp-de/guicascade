@@ -78,6 +78,13 @@ class StreamTracer:
     run_id: str
     shots: dict[int, bytes] = field(default_factory=dict)
     q: "queue.Queue[dict[str, Any]]" = field(default_factory=queue.Queue)
+    events: list = field(default_factory=list)
+    verdict: dict | None = None
+    """这一轮的**全部事件副本**，给写记录用。
+
+    ⚠️ 早先写记录时是去 `q` 里 `get_nowait()` 抽干的，**那是偷 SSE 的事件**——
+    记完账，前端那条流就再也收不到东西了。队列是"发出去"的通道，
+    要留底就该自己留一份，不该消费别人的队列。"""
 
     def log_step(self, task: str, step) -> None:
         d = step.to_dict()
@@ -92,7 +99,7 @@ class StreamTracer:
         # 模型看到什么、说了什么，并排看才知道它为什么那样决策。
         screen = (getattr(step.observation, "text", "") or "")[:4000]
 
-        self.q.put({
+        ev = {
             "type": "step",
             "index": idx,
             "model": d.get("model", ""),
@@ -106,7 +113,9 @@ class StreamTracer:
             "format_retries": d.get("format_retries", 0),
             "screen": screen,
             "has_shot": idx in self.shots,
-        })
+        }
+        self.events.append(ev)
+        self.q.put(ev)
 
     def log_trajectory(self, trajectory: Trajectory) -> None:
         self.q.put({
@@ -127,11 +136,22 @@ class Run:
     run_id: str
     tracer: StreamTracer
     thread: threading.Thread
-    error: str = ""
+    started: float = 0.0
+    done: bool = False
+    """线程真正退出时由它自己在 finally 里置 True。
+
+    ⚠️ 不要用 `thread.is_alive()` 判"跑完没有"。线程可能因为底层 adb 调用挂死
+    而**永远活着**，那样服务就永久占死了——实测踩过：后面每个 /api/run
+    都被 409 挡掉，60 轮跑测全废。让线程自己报"我结束了"才准。
+    """
 
 
 _RUNS: dict[str, Run] = {}
 _LOCK = threading.Lock()
+_CURRENT: list = [None]
+"""当前在跑的那一个。`None` 表示空闲。
+
+**显式记录，而不是靠线程存活推断**——见 /api/run 里的说明。"""
 """一次只允许跑一个任务。
 
 模拟器是**独占资源**：两个任务同时抢 adb，点击会互相打断，
@@ -158,7 +178,7 @@ def _run_task(run_id: str, cfg_path: str, instruction: str, task_name: str,
         tracer.q.put({"type": "error", "message": msg})
 
     try:
-        tasks = collect_tasks(adb, "emulator-5554")
+        tasks = _tasks_cached(adb, "emulator-5554")
         task = tasks.get(task_name) if task_name else None
 
         # 环境自检：网络坏了的话浏览器类任务必挂，而且**不会报错**，
@@ -206,6 +226,7 @@ def _run_task(run_id: str, cfg_path: str, instruction: str, task_name: str,
 
         tracer.q.put({"type": "start", "instruction": instruction,
                       "task": task_name, "max_steps": max_steps})
+        print(f"[run {run_id}] 开始（{task_name or '自由对话'}）")
         agent.run(instruction)
 
         # 判分：读设备真实状态，不是问模型。
@@ -217,33 +238,171 @@ def _run_task(run_id: str, cfg_path: str, instruction: str, task_name: str,
         if task is not None:
             time.sleep(1.5)   # 等界面稳定
             try:
-                success = bool(task.check()) if task.check else False
+                # ⚠️ 判分必须带超时。AndroidWorld 的判分里有 adb 调用，
+                # 设备卡住时它会**一直挂着**——线程不结束，`_RUNS` 里就永远
+                # 有个"活着"的线程，后面每个 /api/run 都被 409 挡掉。
+                # 实测踩过：20 个任务里 19 个"起不来"，全卡在这。
+                success = _call_with_timeout(task.check, 120) if task.check else False
             except Exception as e:  # noqa: BLE001
                 success = False
                 emit_error(f"判分函数抛异常：{type(e).__name__}: {e}")
             if task.teardown is not None:
-                try:
-                    task.teardown()
-                except Exception:  # noqa: BLE001
-                    pass
-            tracer.q.put({"type": "verdict", "success": success,
-                          "check": task_name, "verified": True})
+                _call_with_timeout(task.teardown, 60)
+
+            v = {"type": "verdict", "success": success,
+                 "check": task_name, "verified": True}
+            tracer.verdict = v
+            tracer.events.append(v)
+            tracer.q.put(v)
         else:
-            tracer.q.put({"type": "verdict", "success": None,
-                          "check": "", "verified": False,
-                          "note": "自由指令没有程序化判分，下面显示的是模型自己"
-                                  "认为完成了，不等于验证通过。"})
+            v = {"type": "verdict", "success": None, "check": "", "verified": False,
+                 "note": "自由指令没有程序化判分，下面显示的是模型自己"
+                         "认为完成了，不等于验证通过。"}
+            tracer.verdict = v
+            tracer.events.append(v)
+            tracer.q.put(v)
     except Exception as e:  # noqa: BLE001 - 前台工具，任何异常都要变成看得见的消息
         emit_error(f"{type(e).__name__}: {e}")
         tracer.q.put({"type": "traceback", "text": traceback.format_exc()[-1500:]})
         tracer.q.put({"type": "done", "success": False, "summary": {}})
+        # 记录落到**服务端**，不是浏览器 localStorage。
+        #
+        # 理由：批量跑一轮要一两个小时，用 CLI 驱动（浏览器关掉也能跑）。
+        # 记录只存浏览器的话，CLI 跑出来的结果前端看不见，两边就成了两套数据。
+        # 存服务端则**两边看的是同一份**，谁跑的都能在页面上看到。
+        _append_record(cfg_path, task_name, instruction, tracer)
     finally:
+        # 释放锁：**必须在 finally 里**，否则异常路径会把服务永久锁死
+        if _CURRENT[0] and _CURRENT[0].get("run_id") == run_id:
+            _CURRENT[0] = None
         tracer.q.put({"type": "__close__"})
+
+
+
+def _call_with_timeout(fn, seconds: float):
+    """跑 `fn()`，超时就放弃并返回 False。
+
+    为什么不用 signal/async：这是在**后台线程**里跑的，signal 只对主线程有效。
+    判分卡死的后果不是"这个任务失败"，而是**整个服务再也接不了新任务**
+    （线程一直活着 -> 忙判断一直为真 -> 后面全部 409）。所以宁可放弃这一次判分。
+    """
+    box: dict = {}
+
+    def run():
+        try:
+            box["v"] = fn()
+        except Exception as e:  # noqa: BLE001
+            box["e"] = e
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    t.join(seconds)
+    if t.is_alive():
+        print(f"[timeout] 判分/清理超过 {seconds}s，放弃")
+        return False
+    if "e" in box:
+        raise box["e"]
+    return box.get("v", False)
+
+
+
+# --------------------------------------------------------------------------
+# 任务表缓存
+# --------------------------------------------------------------------------
+
+_TASK_CACHE: dict = {"at": 0.0, "tasks": {}}
+_TASK_TTL = 300.0
+
+
+def _tasks_cached(adb: str, serial: str) -> dict:
+    """任务表**必须缓存**。
+
+    每次 `collect_tasks()` 都要 import 整个 android_world 包（加载 20 个任务类
+    + 编译好的 proto），实测要 30~60 秒。
+
+    踩过的坑：`/api/run` 为了校验任务名，每个请求都重新加载一次。
+    批量驱动那边 curl 的 `--max-time` 是 60 秒，于是**请求超时 -> 拿不到
+    run_id -> 被当成"服务忙" -> 无限重试**。表现是 20 个任务全部"起不来"，
+    而服务端其实是好的、日志里一条错误都没有。
+
+    **一个只读的、30 秒才能算出来的表，没有任何理由每个请求重算一次。**
+    """
+    now = time.time()
+    if not _TASK_CACHE["tasks"] or (now - _TASK_CACHE["at"]) > _TASK_TTL:
+        _TASK_CACHE["tasks"] = collect_tasks(adb, serial)
+        _TASK_CACHE["at"] = now
+    return _TASK_CACHE["tasks"]
+
+
+# --------------------------------------------------------------------------
+# 测试记录（服务端）
+# --------------------------------------------------------------------------
+
+_RECORDS = ROOT / "results" / "web_records.jsonl"
+"""一行一轮，跑完即落盘。**追加写**，所以中途挂了也不丢已完成的。"""
+
+_CONFIG_KEY = {
+    "android_small": "small",
+    "android_large": "large",
+    "android_cascade_repeat": "cascade",
+    "android_cascade": "cascade",
+}
+
+
+def _config_key(path: str) -> str:
+    """从配置文件名推出配置标识。前端按它分三栏。"""
+    stem = Path(path).stem
+    return _CONFIG_KEY.get(stem, stem)
+
+
+def _append_record(cfg_path: str, task_name: str, instruction: str, tracer) -> None:
+    """把这一轮的步骤事件和判分结果写到 records 文件。
+
+    存**原始事件**而不是渲染好的 HTML：前端本来就有一套 `stepHtml()`，
+    让它自己渲染，两边样式才不会各写一份、各错各的。
+    """
+    try:
+        evs = list(tracer.events)        # 副本，**不动队列**
+        verdict = tracer.verdict
+        steps = [e for e in evs if e.get("type") == "step"]
+        rec = {
+            "task": task_name or "(自由对话)",
+            "instruction": instruction,
+            "config": _config_key(cfg_path),
+            "ok": (verdict or {}).get("success"),
+            "verified": (verdict or {}).get("verified", False),
+            "steps": len(steps),
+            "escalated": sum(1 for e in steps if e.get("escalated")),
+            "at": time.time(),
+            "errors": [e.get("message", "")[:200] for e in evs if e.get("type") == "error"][:3],
+            "events": steps,
+        }
+        _RECORDS.parent.mkdir(parents=True, exist_ok=True)
+        with _RECORDS.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + chr(10))
+    except Exception as e:  # noqa: BLE001 - 记不上不该影响跑测
+        print(f"[records] 写记录失败：{type(e).__name__}: {e}")
+
+
+def _read_records() -> list[dict]:
+    if not _RECORDS.exists():
+        return []
+    out = []
+    for line in _RECORDS.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            out.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return out[-400:]      # 只回最近 400 条，页面用不着更老的
 
 
 # --------------------------------------------------------------------------
 # HTTP
 # --------------------------------------------------------------------------
+
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -279,9 +438,13 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, f.read_bytes(), "text/html; charset=utf-8")
             return
 
+        if path == "/api/records":
+            self._json({"records": _read_records()})
+            return
+
         if path == "/api/tasks":
             try:
-                tasks = collect_tasks(find_adb(), "emulator-5554")
+                tasks = _tasks_cached(find_adb(), "emulator-5554")
                 self._json({"tasks": [
                     {"name": t.key, "label": t.name, "source": t.source,
                      "instruction": t.instruction, "steps_hint": list(t.steps_hint)}
@@ -366,9 +529,26 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         with _LOCK:
-            busy = [r for r in _RUNS.values() if r.thread.is_alive()]
-            if busy:
-                self._json({"error": "已经有一个任务在跑了。"
+            # ⚠️ **不用"线程活没活"判断忙闲。**
+            #
+            # 踩过两次：底层 adb 挂死时线程永远活着，服务就**永久卡住**，
+            # 后面每一个 /api/run 都被 409 挡掉（实测 20 个任务 19 个"起不来"）。
+            #
+            # 改成显式的时间戳锁：谁开的、什么时候开的，一目了然；
+            # 超过 RUN_TIMEOUT 直接强制释放——**跑测工具的可恢复性
+            # 比"绝不误杀"更重要**，误杀的代价是重跑一个任务，
+            # 卡死的代价是整轮实验作废。
+            RUN_TIMEOUT = 60 * 15
+            now = time.time()
+            cur = _CURRENT[0]
+            if cur is not None and (now - cur["started"]) > RUN_TIMEOUT:
+                print(f"[lock] 上一个任务 {cur['run_id']} 已跑 "
+                      f"{(now-cur['started'])/60:.1f} 分钟，强制释放")
+                _CURRENT[0] = None
+                cur = None
+            if cur is not None:
+                self._json({"error": "已经有一个任务在跑了（自 "
+                                     f"{(now-cur['started'])/60:.1f} 分钟前开始）。"
                                      "模拟器是独占资源，同时跑两个会互相打断。"}, 409)
                 return
 
@@ -390,7 +570,7 @@ class Handler(BaseHTTPRequestHandler):
                 # 不能让前端自由发挥——指令和判分是成对的，
                 # 改一个字，判分判的就不是同一件事了。
                 try:
-                    tasks = collect_tasks(find_adb(), "emulator-5554")
+                    tasks = _tasks_cached(find_adb(), "emulator-5554")
                 except Exception as e:  # noqa: BLE001
                     self._json({"error": f"读不到任务定义：{e}"}, 500)
                     return
@@ -404,7 +584,9 @@ class Handler(BaseHTTPRequestHandler):
                 args=(run_id, cfg_path, instruction, task_name, max_steps, capture),
                 daemon=True,
             )
-            _RUNS[run_id] = Run(run_id=run_id, tracer=tracer, thread=t)
+            _RUNS[run_id] = Run(run_id=run_id, tracer=tracer, thread=t,
+                                started=time.time())
+            _CURRENT[0] = {"run_id": run_id, "started": time.time()}
             t.start()
 
         self._json({"run_id": run_id, "instruction": instruction})
