@@ -333,6 +333,7 @@ input,textarea,select{font:inherit;color:inherit}
         </select>
         <span class="hint" style="margin-left:6px">记录自动保存在浏览器里，刷新不丢</span>
         <span class="spacer"></span>
+        <button class="run" id="stop" style="background:var(--bad);display:none">■ 停止</button>
         <button class="run" id="clear" style="background:var(--bg3);color:var(--fg2)">清空记录</button>
       </div>
 
@@ -537,7 +538,6 @@ const CONFIGS = [
 ];
 
 let tasks = [];
-let busy = false;
 
 // records[taskName][configKey] = {ok, steps, esc, secs, log, at}
 // log 是这一步的完整 HTML，跑完就收起来，点开才渲染
@@ -678,6 +678,7 @@ async function runOne(name, ck, quiet){
   if(busy){ if(!quiet) alert('已经有一个任务在跑了。模拟器是独占资源，一次只能跑一个。'); return; }
   busy = true;
   document.querySelectorAll('button.mini').forEach(b=>b.disabled=true);
+  $('#stop').style.display='';
 
   const c = CONFIGS.find(x=>x.key===ck);
   const row = document.getElementById('row-'+cssId(name));
@@ -693,8 +694,10 @@ async function runOne(name, ck, quiet){
 
   try{
     const r = await api('/api/run',{method:'POST',headers:{'Content-Type':'application/json'},
+      // 评测跑测**开截图**：没有图，用户只能看到一串无障碍树文本，
+      // 根本对不上屏幕上发生了什么。代价是每步多 ~1.9s。
       body:JSON.stringify({task:name, config:c.cfg,
-        max_steps:+$('#msteps').value, capture_image:false})});
+        max_steps:+$('#msteps').value, capture_image:true})});
     if(r.error) throw new Error(r.error);
 
     await new Promise(done=>{
@@ -738,6 +741,7 @@ async function runOne(name, ck, quiet){
     `<div class="banner err">${esc(e)}</div>`).join('');
 
   busy = false;
+  $('#stop').style.display='none';
   renderEval();
 }
 
@@ -811,6 +815,24 @@ async function loadServerRecords(){
     console.log('[records] 从服务端载入', n, '条');
   }catch(e){ console.warn('服务端记录拉取失败', e); }
 }
+
+$('#stop').onclick = async ()=>{
+  $('#stop').disabled = true;
+  $('#stop').textContent = '停止中…';
+  try{
+    const r = await api('/api/stop', {method:'POST', headers:{'Content-Type':'application/json'},
+      body:'{}'});
+    console.log('[stop]', r);
+  }catch(e){ console.warn(e); }
+  // 服务器会立刻放锁；这一轮的线程在下一拍自己退出
+  setTimeout(()=>{
+    $('#stop').disabled = false;
+    $('#stop').textContent = '■ 停止';
+    $('#stop').style.display = 'none';
+    busy = false;
+    document.querySelectorAll('button.mini').forEach(b=>b.disabled=false);
+  }, 1500);
+};
 
 $('#clear').onclick = ()=>{
   if(!confirm('清空全部测试记录？')) return;

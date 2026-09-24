@@ -1,4 +1,0 @@
-data: {"type": "error", "message": "网络不可用（ping 8.8.8.8 不通（IP 层就没通））。本任务不依赖网络，继续跑——但浏览器类任务现在会失败，别算成模型的问题。"}
-
-data: {"type": "start", "instruction": "打开文件管理应用，进入 Downloads 文件夹。", "task": "ours:files_open_downloads", "max_steps": 6}
-

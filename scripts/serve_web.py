@@ -80,6 +80,12 @@ class StreamTracer:
     q: "queue.Queue[dict[str, Any]]" = field(default_factory=queue.Queue)
     events: list = field(default_factory=list)
     verdict: dict | None = None
+    stop_requested: bool = False
+    """前端点了「停止」。下一拍就中断这一轮。
+
+    ⚠️ 用**抛异常**实现而不是加个 if：`Agent` 的主循环里对异常的处理
+    已经写好了（判负、关环境、记原因），复用它比自己再穿一条停止信号
+    干净得多，也不用为了"能停"去改主循环的签名。"""
     """这一轮的**全部事件副本**，给写记录用。
 
     ⚠️ 早先写记录时是去 `q` 里 `get_nowait()` 抽干的，**那是偷 SSE 的事件**——
@@ -87,6 +93,8 @@ class StreamTracer:
     要留底就该自己留一份，不该消费别人的队列。"""
 
     def log_step(self, task: str, step) -> None:
+        if self.stop_requested:
+            raise RuntimeError("用户中止")
         d = step.to_dict()
         idx = int(d.get("step", 0))
 
@@ -517,6 +525,19 @@ class Handler(BaseHTTPRequestHandler):
         # 两个入口，同一套执行逻辑：
         #   /api/run   跑评测任务（指令从任务定义取，有程序化判分）
         #   /api/chat  自由对话（用户说啥就是啥，没有判分）
+        if path == "/api/stop":
+            stopped = False
+            with _LOCK:
+                cur = _CURRENT[0]
+                if cur is not None:
+                    run = _RUNS.get(cur["run_id"])
+                    if run is not None:
+                        run.tracer.stop_requested = True
+                        stopped = True
+                    _CURRENT[0] = None      # 立刻放锁，不等线程收尾
+            self._json({"stopped": stopped})
+            return
+
         if path not in ("/api/run", "/api/chat"):
             self._send(404, b"not found", "text/plain")
             return
@@ -538,7 +559,7 @@ class Handler(BaseHTTPRequestHandler):
             # 超过 RUN_TIMEOUT 直接强制释放——**跑测工具的可恢复性
             # 比"绝不误杀"更重要**，误杀的代价是重跑一个任务，
             # 卡死的代价是整轮实验作废。
-            RUN_TIMEOUT = 60 * 15
+            RUN_TIMEOUT = 60 * 5
             now = time.time()
             cur = _CURRENT[0]
             if cur is not None and (now - cur["started"]) > RUN_TIMEOUT:

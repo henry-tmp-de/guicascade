@@ -43,9 +43,42 @@ __all__ = ["UnifiedTask", "collect_tasks", "AW_APPS_WE_HAVE"]
 AW_PATH = Path("D:/学习/code/_aw")
 """AndroidWorld 源码位置。换机器改这里，或设环境变量 ANDROID_WORLD_PATH。"""
 
-AW_APPS_WE_HAVE = {"settings", "clock", "chrome", "camera", "contacts", "files", "dialer"}
-"""我们模拟器上装了的 app。AndroidWorld 的很多任务依赖它自己那套 app
-（markor / broccoli / pro expense…），那些我们没装，跑不了。"""
+AW_APPS_WE_HAVE = {
+    # 系统自带
+    "settings", "clock", "chrome", "camera", "contacts", "files", "dialer",
+    # AndroidWorld 自带的那批（用 scripts/setup_androidworld_env.py 装的）
+    "markor", "broccoli app", "pro expense", "simple calendar pro",
+    "simple sms messenger", "simple gallery pro", "retro music", "vlc",
+    "clipper", "tasks", "joplin", "audio recorder", "opentracks",
+    "simple draw pro", "android world",
+}
+"""设备上装了哪些 app——**这决定了哪些 AndroidWorld 任务可跑**。
+
+装它那批 app 之前，这个集合只有系统自带的 7 个，于是 116 个任务里只有
+20 个能进来，而且其中 6 个还因为缺预置数据跑不了。
+
+现在用 `scripts/setup_androidworld_env.py` 把 markor（17 个任务）、
+broccoli（13 个）、pro expense（9 个）这些装上之后，可跑的任务面**大了一个量级**。"""
+
+_NEEDS_AW_ENV = {
+    # 这些任务的前置数据（文件、网页）**不在任务代码里，而在快照里**。
+    # AndroidWorld 的 `initialize_task` 会去还原预置的 app 快照：
+    #     /data/data/android_world/snapshots/<app>/
+    # 那个目录来自它**定制的模拟器镜像**，我们这台设备上根本不存在
+    # （实测：`/data/data/android_world/` 整个目录都没有）。
+    #
+    # 后果是 `initialize_task` **静默失败**——只打一行 warning，
+    # 任务照跑，但 Agent 要找的东西压根不在设备上，必然失败。
+    # 这种失败会被记成"模型不行"，所以**必须从列表里剔掉**，不能留着充数。
+    #
+    # 换用 AndroidWorld 官方 AVD（带全部 app + 快照）之后可以把它们加回来。
+    "BrowserDraw",            # 需要 /sdcard/Download/task.html
+    "BrowserMaze",            # 同上
+    "BrowserMultiply",        # 同上
+    "FilesDeleteFile",        # 需要预置文件 jolly_tree_final.pdf 等
+    "FilesMoveFile",          # 需要预置文件
+    "ContactsNewContactDraft",  # 读 UI 树，我们的 forest 结构和它家对不上
+}
 
 _EXCLUDE_SUFFIX = "Verify"
 """见模块开头对 Verify 白送分的说明。
@@ -109,6 +142,8 @@ def _androidworld(adb: str, serial: str, aw_path: Path) -> list[UnifiedTask]:
             continue          # 依赖我们没装的 app
         if name.endswith(_EXCLUDE_SUFFIX):
             continue          # 见模块开头：起点就判成功，白送分
+        if name in _NEEDS_AW_ENV:
+            continue          # 前置数据在快照里，我们设备上没有
 
         # 参数固定下来：随机参数会让两次跑的不是同一个任务，
         # 没法比较，也没法复现。**评测要的是可比性，不是多样性。**
