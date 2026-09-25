@@ -64,7 +64,6 @@ __all__ = ["main"]
 # --------------------------------------------------------------------------
 
 
-@dataclass
 def _shrink(png: bytes, width: int = 420) -> bytes:
     """把截图缩小再存盘。
 
@@ -97,6 +96,7 @@ def _shrink(png: bytes, width: int = 420) -> bytes:
         return png
 
 
+@dataclass
 class StreamTracer:
     """把每一步推进一个队列，供 SSE 取走。
 
@@ -542,10 +542,15 @@ class Handler(BaseHTTPRequestHandler):
             if img:
                 self._send(200, img, "image/png")
                 return
-            p = _SHOT_DIR / run_id / f"{idx}.jpg"
-            if p.is_file():
-                self._send(200, p.read_bytes(), "image/jpeg")
-                return
+            # 两种后缀都找：`.jpg` 是压缩后的（现在的默认），`.png` 是早期
+            # 没压缩时留下的原图。**老数据也要能看**——不然改一次格式，
+            # 之前跑的所有记录截图全变裂图，而记录本身还在，很难解释。
+            for name, ctype in ((f"{idx}.jpg", "image/jpeg"),
+                                (f"{idx}.png", "image/png")):
+                p = _SHOT_DIR / run_id / name
+                if p.is_file():
+                    self._send(200, p.read_bytes(), ctype)
+                    return
             self._send(404, b"no shot", "text/plain")
             return
 
