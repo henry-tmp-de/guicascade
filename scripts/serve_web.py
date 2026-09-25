@@ -116,9 +116,22 @@ class StreamTracer:
     """
 
     run_id: str
+    t0: float = field(default_factory=time.time)
+    """这一轮开始的时刻。记录里要写耗时——**服务端记录原先没有这个字段**，
+    前端渲染成 `nulls`，看着像坏了。而且"这一步跑了多久"本来就是分析失败
+    原因时要看的东西（卡在模型还是卡在环境，看耗时最直接）。"""
     shots: dict[int, bytes] = field(default_factory=dict)
     q: "queue.Queue[dict[str, Any]]" = field(default_factory=queue.Queue)
     events: list = field(default_factory=list)
+    """这一轮的**全部事件副本**，给写记录用。
+
+    ⚠️ 早先写记录时是去 `q` 里 `get_nowait()` 抽干的，**那是偷 SSE 的事件**——
+    记完账，前端那条流就再也收不到东西了。队列是"发出去"的通道，
+    要留底就该自己留一份，不该消费别人的队列。
+
+    另一处踩过的坑：这段说明原来写在 `stop_requested` 后面，成了类体里一个
+    **没人接的字符串**，等于没写。字段说明要**紧跟在字段定义后面**才作数。
+    """
     verdict: dict | None = None
     stop_requested: bool = False
     """前端点了「停止」。下一拍就中断这一轮。
@@ -126,11 +139,20 @@ class StreamTracer:
     ⚠️ 用**抛异常**实现而不是加个 if：`Agent` 的主循环里对异常的处理
     已经写好了（判负、关环境、记原因），复用它比自己再穿一条停止信号
     干净得多，也不用为了"能停"去改主循环的签名。"""
-    """这一轮的**全部事件副本**，给写记录用。
 
-    ⚠️ 早先写记录时是去 `q` 里 `get_nowait()` 抽干的，**那是偷 SSE 的事件**——
-    记完账，前端那条流就再也收不到东西了。队列是"发出去"的通道，
-    要留底就该自己留一份，不该消费别人的队列。"""
+    def log_error(self, message: str) -> None:
+        """记一条错误：**SSE 和落盘副本都要写**，缺一不可。
+
+        ⚠️ 早先这个动作只有 `q.put(...)`，没进 `events`，于是
+        `web_records.jsonl` 里的 `errors` **永远是空数组**。
+
+        后果在**事后**才显形：翻记录时看不出这个任务为什么失败，只能重新跑
+        一遍去复现——而复盘靠的就是这个文件。跑测跑到半夜、第二天回看
+        "怎么全挂"，却一条原因都查不到，就是这么来的。
+        """
+        ev = {"type": "error", "message": message}
+        self.events.append(ev)
+        self.q.put(ev)
 
     def log_step(self, task: str, step) -> None:
         if self.stop_requested:
@@ -238,7 +260,10 @@ def _run_task(run_id: str, cfg_path: str, instruction: str, task_name: str,
     adb = find_adb()
 
     def emit_error(msg: str) -> None:
-        tracer.q.put({"type": "error", "message": msg})
+        # 走 tracer.log_error 而不是直接 q.put：**要落盘**。
+        # 只进队列的话，浏览器里闪一下就没了，第二天翻 web_records.jsonl
+        # 只看得到 errors: []，等于没记。
+        tracer.log_error(msg)
 
     try:
         tasks = _tasks_cached(adb, "emulator-5554")
@@ -270,11 +295,37 @@ def _run_task(run_id: str, cfg_path: str, instruction: str, task_name: str,
         # 前置状态：AndroidWorld 的任务自带 initialize_task（建联系人、
         # 铺文件、设设备时间……），我们的任务没有这步。**必须在建 env 之后、
         # 跑 agent 之前做**——它是任务的一部分，不是环境的一部分。
+        setup_error = ""
         if task is not None and task.setup is not None:
             try:
                 task.setup()
             except Exception as e:  # noqa: BLE001
-                emit_error(f"任务前置状态建立失败：{type(e).__name__}: {e}")
+                setup_error = f"{type(e).__name__}: {e}"
+                emit_error(f"任务前置状态建立失败：{setup_error}")
+
+        if setup_error:
+            # **不跑，也不判负。**
+            #
+            # 前置状态没建起来（缺 app、缺数据、少了那个目录……），任务的条件
+            # 根本不成立。这时候还让 agent 去跑，跑出来的必然是失败，而且会被
+            # 算进"模型成功率"里 —— **这正是 15 个缺 FTS 的任务被记成模型失败的
+            # 机制**。所以要在源头掐掉：记成"环境未就绪"，success=None，
+            # 哪一边都不算。
+            #
+            # 宁可少一个样本，也不要一个把环境故障算在模型头上的样本：
+            # 前者只是样本变小，后者会让人得出"模型不行"的错误结论，
+            # 而那个结论看起来和数据完全一致，几乎不可能事后发现。
+            if task is not None and task.teardown is not None:
+                _call_with_timeout(task.teardown, 60)
+            v = {"type": "verdict", "success": None, "check": task_name,
+                 "verified": False,
+                 "note": f"前置状态没建起来（{setup_error}）——这一轮**没有跑**，"
+                         "也不算模型失败。先按环境问题排查。"}
+            tracer.verdict = v
+            tracer.events.append(v)
+            tracer.q.put(v)
+            tracer.q.put({"type": "done", "success": None, "summary": {}})
+            return
 
         env = AndroidEnv(
             serial="emulator-5554",
@@ -445,11 +496,18 @@ def _append_record(cfg_path: str, task_name: str, instruction: str, tracer) -> N
         rec = {
             "task": task_name or "(自由对话)",
             "instruction": instruction,
+            # ⚠️ **这一行必须留着。** 截图是按 `results/shots/<run_id>/` 存的，
+            # 记录里不写 run_id，前端就没法把"这一步的文字"和"这一步的截图"
+            # 对上号 —— 翻历史记录时**图全是裂的**，而文字还在，看起来像
+            # "截图功能坏了"或者"图被删了"，实际上是这条线断了。
+            # 实测踩过：241 条记录全裂，磁盘上 266 张图一张没少。
+            "run_id": tracer.run_id,
             "config": _config_key(cfg_path),
             "ok": (verdict or {}).get("success"),
             "verified": (verdict or {}).get("verified", False),
             "steps": len(steps),
             "escalated": sum(1 for e in steps if e.get("escalated")),
+            "secs": round(time.time() - getattr(tracer, "t0", time.time()), 1),
             "at": time.time(),
             "errors": [e.get("message", "")[:200] for e in evs if e.get("type") == "error"][:3],
             "events": steps,
@@ -459,6 +517,62 @@ def _append_record(cfg_path: str, task_name: str, instruction: str, tracer) -> N
             f.write(json.dumps(rec, ensure_ascii=False) + chr(10))
     except Exception as e:  # noqa: BLE001 - 记不上不该影响跑测
         print(f"[records] 写记录失败：{type(e).__name__}: {e}")
+
+
+def _shot_dir_times() -> list[tuple[float, str]]:
+    """每个截图目录的 (最后一笔写入的时刻, run_id)，按时间升序。"""
+    if not _SHOT_DIR.is_dir():
+        return []
+    out = []
+    for d in _SHOT_DIR.iterdir():
+        if not d.is_dir():
+            continue
+        latest = 0.0
+        for f in d.iterdir():
+            try:
+                latest = max(latest, f.stat().st_mtime)
+            except OSError:  # noqa: PERF203 - 某个文件读不到不该毁掉整张表
+                pass
+        if latest:
+            out.append((latest, d.name))
+    out.sort()
+    return out
+
+
+def _attach_run_ids(recs: list[dict]) -> list[dict]:
+    """给**老记录**补上 run_id，好让历史记录里的截图能显示出来。
+
+    ⚠️ **这是启发式，不是权威数据。** 早期版本的记录只存了 `at`（这一轮
+    结束的时刻），没存 run_id；而截图目录的 mtime 落在这一轮进行的过程中。
+    所以"结束时刻之前、时间上最接近的那个目录"通常就是它。
+
+    相邻两轮挨得很近时会认错，认错了显示的就是另一轮的截图。**之所以还是
+    要做**：不认的话那批记录全是裂图，什么都看不到；认错至少能看出个大概。
+    新记录不依赖这个推断——`_append_record` 已经直接存 run_id 了。
+    """
+    if not any(not r.get("run_id") for r in recs):
+        return recs
+    dirs = _shot_dir_times()
+    if not dirs:
+        return recs
+
+    fixed = 0
+    for r in recs:
+        if r.get("run_id"):
+            continue
+        at = float(r.get("at") or 0)
+        if not at:
+            continue
+        # 目录 mtime 必须**不晚于**这一轮结束（留 5 秒给时钟误差），
+        # 在里面取最晚的那个 —— 也就是"这一轮结束前最后在写图的目录"
+        cand = [name for m, name in dirs if m <= at + 5]
+        if cand:
+            r["run_id"] = cand[-1]
+            r["run_id_inferred"] = True
+            fixed += 1
+    if fixed:
+        print(f"[records] 给 {fixed} 条老记录按时间倒推了 run_id（截图恢复显示）")
+    return recs
 
 
 def _read_records() -> list[dict]:
@@ -516,7 +630,9 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if path == "/api/records":
-            self._json({"records": _read_records()})
+            # 过一遍 _attach_run_ids：老记录没存 run_id，截图会全裂，
+            # 见那个函数的说明（为什么用时间倒推、以及它不保证准）。
+            self._json({"records": _attach_run_ids(_read_records())})
             return
 
         if path == "/api/tasks":

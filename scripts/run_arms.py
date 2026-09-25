@@ -145,6 +145,8 @@ def main() -> int:
                     help="每组只跑前 N 个任务（冒烟测试用）")
     ap.add_argument("--tasks", default="",
                     help="只跑名字含这些串的任务，逗号分隔")
+    ap.add_argument("--exact", action="store_true",
+                    help="--tasks 按完整任务名精确匹配，而不是子串匹配")
     args = ap.parse_args()
 
     configs = ([c.strip() for c in args.configs.split(",") if c.strip()]
@@ -164,7 +166,19 @@ def main() -> int:
         mine = [t for t in tasks_all if t.get("source") == g]
         if args.tasks:
             keys = [s.strip() for s in args.tasks.split(",") if s.strip()]
-            mine = [t for t in mine if any(k in t["name"] for k in keys)]
+            if args.exact:
+                # **默认的子串匹配很容易多带任务**，实测踩过：给
+                # 'MarkorCreateNote' 会连 MarkorCreateNoteAndSms /
+                # MarkorCreateNoteFromClipboard 一起跑，给
+                # 'RecipeAddMultipleRecipes' 会带进三个变体——
+                # 结果是"选了 14 个跑出 20 个"，时间多花一倍还不自知。
+                # 想精确指定一批就用 --exact。带不带 `aw:` 前缀都认。
+                want = {k if k.startswith(("aw:", "ours:")) else f"aw:{k}" for k in keys}
+                want |= {k.split(":", 1)[-1] for k in want}
+                mine = [t for t in mine
+                        if t["name"] in want or t["name"].split(":", 1)[-1] in want]
+            else:
+                mine = [t for t in mine if any(k in t["name"] for k in keys)]
         if args.limit:
             mine = mine[: args.limit]
         if not mine:

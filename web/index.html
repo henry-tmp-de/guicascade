@@ -123,6 +123,8 @@ input,textarea,select{font:inherit;color:inherit}
 .step .shot img{width:104px;border:1px solid var(--line2);border-radius:6px;
   cursor:zoom-in;display:block;margin-top:2px}
 .step .shot img:hover{border-color:var(--accent)}
+/* 有截图但没 run_id（老记录）时的占位说明，比一个 404 裂图图标有信息量 */
+.step .shot.miss{font-size:11.5px;color:var(--fg3);max-width:150px;line-height:1.4}
 
 .sig{display:flex;gap:12px;margin-top:6px;font-size:11.5px;color:var(--fg3)}
 .sig b{font-family:var(--mono);font-weight:600}
@@ -652,7 +654,8 @@ function taskRow(t){
     const r = rec(t.name, c.key);
     const cls = r ? (r.ok?'ok':'no') : 'idle';
     const txt = r ? (r.ok?'✅':'❌') : '—';
-    const line = r ? `${r.steps}步${r.esc?` ⬆${r.esc}`:''} ${r.secs}s` : '未运行';
+    const line = r ? `${r.steps}步${r.esc?` ⬆${r.esc}`:''}`
+                     + (r.secs!=null ? ` ${Math.round(r.secs)}s` : '') : '未运行';
     const canLog = r && r.log;
     return `<div class="ccell ${cls}">
       <div class="res">${txt} <span class="rl">${line}</span></div>
@@ -807,7 +810,8 @@ function stepHtml(rid, d){
       ${sig?`<div class="sig">${sig}</div>`:''}
       ${d.screen?`<details><summary>它看到的屏幕</summary><pre>${esc(d.screen)}</pre></details>`:''}
     </div>
-    ${d.has_shot?`<div class="shot"><img loading="lazy" src="/api/shot/${rid}/${d.index}" onclick="zoom(this.src)"></div>`:''}
+    ${(d.has_shot && rid)?`<div class="shot"><img loading="lazy" src="/api/shot/${rid}/${d.index}" onclick="zoom(this.src)"></div>`:
+      (d.has_shot?'<div class="shot miss">这一步有截图，但找不到它属于哪一轮（老记录没存 run_id）</div>':'')}
   </div>`;
 }
 
@@ -826,10 +830,16 @@ async function loadServerRecords(){
       if(cur && (cur.at || 0) >= at) continue;          // 本地这份更新，别被覆盖
       records[r.task][ck] = {
         ok: r.ok, steps: r.steps || 0, esc: r.escalated || 0,
-        secs: null, at,
+        // 耗时：老记录里没有这个字段（服务端当时没存），给 null 而不是 0——
+        // 渲染层会把它显示成空白，比显示 "nulls" 或者假装跑了 0 秒都诚实
+        secs: (typeof r.secs === 'number') ? r.secs : null, at,
         // 服务端存的是**原始事件**，这里用同一套 stepHtml 渲染——
-        // 两边共用一份渲染逻辑，样式才不会各写各的
-        log: (r.events || []).map(e => stepHtml('', e)).join(''),
+        // 两边共用一份渲染逻辑，样式才不会各写各的。
+        //
+        // ⚠️ 第二参数是 **run_id**，截图 URL 靠它拼。以前这里写的是空字符串，
+        // 于是历史记录里的图片全部 404（`/api/shot//0`）——**图全裂，文字还在**，
+        // 看着像"截图被删了"，其实是记录和图片目录之间那根线断了。
+        log: (r.events || []).map(e => stepHtml(r.run_id || '', e)).join(''),
         errors: r.errors || [],
         fromServer: true,
       };
