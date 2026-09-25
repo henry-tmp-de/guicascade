@@ -1,85 +1,66 @@
 #!/usr/bin/env bash
-# 给 Anaconda 的 sqlite3 补上 FTS3/FTS4 —— 换 sqlite.org 官方的 DLL。
+# 下载带 FTS3/FTS4 的官方 sqlite3.dll，并验证 Python 侧确实用上了。
 #
-# ## 为什么需要
+# ## 这个脚本**不**替换 Anaconda 的 DLL —— 有意为之
 #
-# Anaconda 自带的 `sqlite3.dll` 编译时**没开 FTS3/FTS4**（只开了 FTS5）。
-# 而 AndroidWorld 有一批任务要读带 FTS 索引的 sqlite 库（broccoli 的菜谱库、
-# VLC 的播放列表库），本机一读就报：
+# 最早的版本是 `cp` 到 `D:\Anaconda\Library\bin\` 覆盖原 DLL。在这台机器上
+# **走不通**：
 #
-#     OperationalError: no such module: FTS4
+#     D:\Anaconda\Library\bin   只给 BUILTIN\Users  ReadAndExecute
+#     D:\Anaconda\DLLs          同样不可写
 #
-# 后果非常隐蔽：`initialize_task` 抛异常 -> 任务在起点就废 -> **被记成模型失败**。
-# 实测 59 个 AndroidWorld 任务里有 **15 个**（13 个 Recipe + 2 个 Vlc）栽在这上面。
-# 这不是模型的锅，是**本机 Python 的编译选项**，但分数上完全看不出来。
+# 两处都要管理员权限。脚本会报 `Permission denied`，而且**验证那一步还会
+# 打印"❌ 仍有不可用的"** —— 看上去像脚本坏了，其实是权限。
 #
-# ## 为什么要换 DLL 而不是装包
+# 现在改用**进程内预加载**，不需要任何管理员权限，也不改系统里任何一个文件。
+# 机制和理由见 `scripts/_sqlite_fts.py` 的 docstring。
 #
-# `pysqlite3-binary` 没有 Windows 轮子（那是 Linux/macOS 专用）。
-# sqlite.org 官方的 Windows DLL **默认就编了 FTS3/4/5**，直接换上去最省事。
-# 注意：SQLite 里 **FTS4 是跟着 FTS3 一起编的**——看到 `ENABLE_FTS3`
-# 就等于 FTS3 和 FTS4 都能用，不用去找单独的 `ENABLE_FTS4`。
+# ## 所以这个脚本现在只干两件事
 #
-# ## 用法（必须先把所有 python 进程停掉，DLL 被占用时换不了）
+#   1. 把官方 DLL 下到 D:\tools\sqlite-fts\<版本>\ （仓库外，不入库）
+#   2. 跑自检，确认 fts3/fts4/fts5 都可用
 #
-#     bash scripts/fix_sqlite_fts.sh
+# ## 用法
 #
-# 回滚：把 `sqlite3.dll.anaconda-backup` 改回 `sqlite3.dll` 即可。
+#     bash scripts/fix_sqlite_fts.sh          # 已有 DLL 就跳过下载，直接自检
+#
+# 自检不过时先看它打印的 sqlite 版本号：如果还是 3.51.0，说明预加载没生效
+# （通常是 ensure_fts() 被放在了 import sqlite3 之后）。
 
 set -u
 
-BIN="/d/Anaconda/Library/bin"
-SRC="/d/tools/sqlite-fts/sqlite3.dll"
-DST="$BIN/sqlite3.dll"
-BAK="$BIN/sqlite3.dll.anaconda-backup"
+VER="3530400"                       # sqlite 3.53.4
+BASE="/d/tools/sqlite-fts"
+DIR="$BASE/$VER"
+ZIP="$BASE/sqlite-dll-win-x64-$VER.zip"
+URL="https://www.sqlite.org/2026/sqlite-dll-win-x64-$VER.zip"
 
-if [ ! -f "$SRC" ]; then
-  echo "❌ 找不到官方 DLL：$SRC"
-  echo "   下载：curl -sL -o /d/tools/sqlite-fts/sqlite-dll.zip \\"
-  echo "         https://www.sqlite.org/2024/sqlite-dll-win-x64-3460100.zip"
-  exit 1
-fi
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-# 检查还有没有 python 占着 DLL
-echo "→ 检查占用..."
-if powershell.exe -NoProfile -Command \
-   "if (Get-Process python -ErrorAction SilentlyContinue) { exit 1 } else { exit 0 }" 2>/dev/null; then
-  echo "  python 进程已清空"
+echo "→ 官方 DLL：$DIR/sqlite3.dll"
+if [ -f "$DIR/sqlite3.dll" ]; then
+  echo "  已存在，跳过下载"
 else
-  echo "  ⚠️ 还有 python 在跑，DLL 会被占用导致替换失败。"
-  echo "     先停掉服务器和跑测进程再来。"
-  exit 2
+  mkdir -p "$DIR"
+  echo "  下载 $URL"
+  # 走本机 Clash 代理；直连 sqlite.org 在这台机器上会超时
+  https_proxy="${https_proxy:-http://127.0.0.1:7897}" \
+  http_proxy="${http_proxy:-http://127.0.0.1:7897}" \
+    curl -sL --max-time 120 -o "$ZIP" "$URL" || { echo "  ❌ 下载失败"; exit 1; }
+  ( cd "$DIR" && unzip -oq "$ZIP" ) || { echo "  ❌ 解压失败"; exit 1; }
+  echo "  已解压到 $DIR"
 fi
 
-# 备份（只备份一次，反复跑不会用坏掉的版本覆盖好备份）
-if [ -f "$BAK" ]; then
-  echo "→ 备份已存在，保留不动：$BAK"
+echo
+echo "→ 自检（走 scripts/_sqlite_fts.py，和线上同一条路径）"
+cd "$ROOT/scripts" || exit 1
+/d/Anaconda/python.exe _sqlite_fts.py
+rc=$?
+
+echo
+if [ $rc -eq 0 ]; then
+  echo "✅ FTS3/FTS4 可用，那 15 个任务（13 Recipe + 2 Vlc）不再被误记为模型失败"
 else
-  cp -p "$DST" "$BAK" && echo "→ 已备份到 $BAK"
+  echo "❌ 自检未通过 —— 看上面的 sqlite 版本号定位是「没下载到」还是「预加载没生效」"
 fi
-
-cp "$SRC" "$DST" && echo "→ 已替换为官方 DLL"
-
-echo "→ 验证..."
-/d/Anaconda/python.exe -c "
-import sqlite3
-print('  sqlite 版本:', sqlite3.sqlite_version)
-bad = []
-for m in ('fts3', 'fts4', 'fts5'):
-    try:
-        c = sqlite3.connect(':memory:')
-        c.execute(f'CREATE VIRTUAL TABLE t USING {m}(x)')
-        c.execute(\"INSERT INTO t VALUES('hello world')\")
-        r = c.execute(\"SELECT * FROM t WHERE t MATCH 'hello'\").fetchall()
-        print(f'  {m}: ✅  查询返回 {r}')
-    except Exception as e:
-        print(f'  {m}: ❌ {e}')
-        bad.append(m)
-if bad:
-    print()
-    print('  ⚠️ 仍有不可用的：', bad)
-    print('     回滚：cp $BAK $DST'.replace('\$BAK', '$BAK').replace('\$DST', '$DST'))
-    raise SystemExit(1)
-print()
-print('  ✅ FTS3/FTS4 都可用了，可以补跑那 15 个任务')
-"
+exit $rc

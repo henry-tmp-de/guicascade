@@ -36,6 +36,13 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "scripts"))
 
+# 这个模块是**唯一会把 AndroidWorld 拉进来**的地方，所以把 FTS 补丁放这儿兜底：
+# 不管谁 import 了 task_sets，都先经过预加载。serve_web.py 里也调了一次是故意的
+# ——那边调得更早，这里只是防止别的脚本绕过。两次调用是幂等的。
+from _sqlite_fts import ensure_fts  # noqa: E402
+
+ensure_fts()
+
 from android_tasks import build_tasks, cleanup_device  # noqa: E402
 
 __all__ = ["UnifiedTask", "collect_tasks", "AW_APPS_WE_HAVE"]

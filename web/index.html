@@ -241,6 +241,9 @@ input,textarea,select{font:inherit;color:inherit}
 .trow .cname{padding:13px 14px;min-width:0}
 .trow .nm{font-family:var(--mono);font-size:12px;color:var(--fg2)}
 .trow .ins{font-size:13px;margin-top:3px;color:var(--fg)}
+.trow .bud{font-size:12px;margin-top:4px;color:var(--fg3)}
+.trow .bud b{color:var(--fg2)}
+.trow .bwarn{color:var(--bad)}
 
 .ccell{padding:13px 14px;border-left:1px solid var(--line);
   display:flex;flex-direction:column;gap:7px;justify-content:center}
@@ -328,8 +331,15 @@ input,textarea,select{font:inherit;color:inherit}
 
       <div class="bar">
         <label>步数上限</label>
+        <!-- 默认「按任务官方预算」（value=0，服务端解释成"用这个任务自己的"）。
+             以前这里写死 12，而官方预算是 10~120 步，12 比最少的还低——
+             任务被截断，看起来却像模型不行。手填的值仍然可以覆盖它。 -->
         <select id="msteps">
-          <option>8</option><option selected>12</option><option>16</option><option>20</option>
+          <option value="0" selected>按任务官方预算</option>
+          <option value="12">12 步</option>
+          <option value="20">20 步</option>
+          <option value="40">40 步</option>
+          <option value="80">80 步</option>
         </select>
         <span class="hint" style="margin-left:6px">记录自动保存在浏览器里，刷新不丢</span>
         <span class="spacer"></span>
@@ -624,6 +634,19 @@ function sum3(g){
   }).join('')}</div>`;
 }
 
+// 这个任务的官方步数预算。**显示出来是刻意的**：以前上限是个写死的 12，
+// 用户看不出"这个任务本来该给多少步"，被截断了也不知道，最后读成"模型不行"。
+function budget(t){
+  const b = (t.steps_hint||[])[1];
+  if(!b) return '';
+  const chosen = +$('#msteps').value;
+  if(chosen>0){
+    const warn = chosen < b ? ` <span class="bwarn">⚠️ 低于官方，会被截断</span>` : '';
+    return `<div class="bud">官方预算 ${b} 步 · 本次用 <b>${chosen}</b> 步${warn}</div>`;
+  }
+  return `<div class="bud">官方预算 <b>${b}</b> 步</div>`;
+}
+
 function taskRow(t){
   const cells = CONFIGS.map(c=>{
     const r = rec(t.name, c.key);
@@ -644,7 +667,8 @@ function taskRow(t){
   return `<div class="trow" id="row-${cssId(t.name)}">
     <div class="cols">
       <div class="cname"><div class="nm">${esc(t.label||t.name)}</div>
-        <div class="ins">${esc(t.instruction)}</div></div>
+        <div class="ins">${esc(t.instruction)}</div>
+        ${budget(t)}</div>
       ${cells}
     </div>
     <div class="logbox" id="log-${cssId(t.name)}"></div>

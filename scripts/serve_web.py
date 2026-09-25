@@ -48,6 +48,14 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "scripts"))
 
+# **必须是这里**：在任何会拉起 sqlite3 的 import 之前。AndroidWorld 有 15 个
+# 任务要读带 FTS 索引的 sqlite 库，本机 Anaconda 的 sqlite3.dll 没编 FTS3/4，
+# 那些任务会在 initialize_task 就废，然后被记成"模型失败"——分数上完全看不出来。
+# 详见 _sqlite_fts 的 docstring（为什么不能直接换 Anaconda 的 DLL）。
+from _sqlite_fts import ensure_fts  # noqa: E402
+
+ensure_fts()
+
 from android_tasks import check_network, cleanup_device  # noqa: E402
 from task_sets import collect_tasks  # noqa: E402
 from guicascade.agent import Agent  # noqa: E402
@@ -669,7 +677,13 @@ class Handler(BaseHTTPRequestHandler):
 
             task_name = body.get("task", "")
             message = (body.get("message") or "").strip()
-            max_steps = int(body.get("max_steps", 12))
+            # 0 或没给 = "按任务自己的官方预算"，下面查到任务后再定。
+            #
+            # ⚠️ 这里原来写死 12，是上一轮跑测最大的坑之一：官方给这批任务的
+            # 预算是 10~120 步，12 比最少的还低，57/59 个任务撞上限被截断。
+            # 结论当时读作"模型不行"，其实一半是**没让它跑完**。
+            # 前端那条路径也写死过 12 —— 修 `run_arms.py` 的时候漏了它。
+            max_steps = int(body.get("max_steps", 0) or 0)
             cfg_path = body.get("config", "configs/android_cascade_repeat.yaml")
             capture = bool(body.get("capture_image", True))
 
@@ -677,9 +691,10 @@ class Handler(BaseHTTPRequestHandler):
             tracer = StreamTracer(run_id=run_id)
 
             if message:
-                # 自由对话：用户直接下要求，没有任务定义、没有判分
+                # 自由对话：用户直接下要求，没有任务定义，也就没有官方预算可用
                 instruction = message
                 task_name = ""
+                max_steps = max_steps or 12
             else:
                 # 跑评测任务：**指令必须从任务定义里取**，
                 # 不能让前端自由发挥——指令和判分是成对的，
@@ -693,6 +708,10 @@ class Handler(BaseHTTPRequestHandler):
                     self._json({"error": f"没有名为 {task_name!r} 的任务"}, 400)
                     return
                 instruction = tasks[task_name].instruction
+                if max_steps <= 0:
+                    # 这个任务的官方预算（AndroidWorld 是 int(10*complexity)，
+                    # 自建任务是我们自己标的）。口径对齐榜单靠的就是它。
+                    max_steps = int(tasks[task_name].steps_hint[-1] or 12)
 
             t = threading.Thread(
                 target=_run_task,

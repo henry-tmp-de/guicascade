@@ -1,0 +1,79 @@
+# 应用名 -> 包名。**本文件由 scripts/gen_apps.py 自动生成，不要手改。**
+#
+# 来源：AndroidWorld 的 `_PATTERN_TO_ACTIVITY`，并且只保留**设备上真装了**的包。
+# 手写的映射放 configs/apps.yaml —— 那份优先，本文件只补它没有的键。
+#
+# 为什么要这张表、为什么它绝不能进提示词：见 configs/apps.yaml 开头的说明。
+#
+# 重新生成：python scripts/gen_apps.py
+
+apps:
+  activity tracker: de.dennisguse.opentracks
+  android world: com.example.androidworld
+  audio recorder: com.dimowner.audiorecorder
+  broccoli: com.flauschcode.broccoli
+  broccoli app: com.flauschcode.broccoli
+  broccoli recipe app: com.flauschcode.broccoli
+  camera: com.android.camera2
+  chrome: com.android.chrome
+  clipper: ca.zgrs.clipper
+  clock: com.google.android.deskclock
+  contacts: com.google.android.contacts
+  dialer: com.google.android.dialer
+  drive: com.google.android.apps.docs
+  files: com.google.android.documentsui
+  gcal: com.google.android.calendar
+  gdrive: com.google.android.apps.docs
+  gemail: com.google.android.gm
+  gmail: com.google.android.gm
+  gmaps: com.google.android.apps.maps
+  google: com.google.android.googlequicksearchbox
+  google calendar: com.google.android.calendar
+  google chrome: com.android.chrome
+  google drive: com.google.android.apps.docs
+  google email: com.google.android.gm
+  google images: com.google.android.apps.photos
+  google mail: com.google.android.gm
+  google mail client: com.google.android.gm
+  google map: com.google.android.apps.maps
+  google maps: com.google.android.apps.maps
+  google photo: com.google.android.apps.photos
+  google photos: com.google.android.apps.photos
+  google pics: com.google.android.apps.photos
+  google search: com.google.android.googlequicksearchbox
+  gphotos: com.google.android.apps.photos
+  joplin: net.cozic.joplin
+  joplin app: net.cozic.joplin
+  maps: com.google.android.apps.maps
+  markor: net.gsantner.markor
+  messages: com.google.android.apps.messaging
+  miniwob: com.google.androidenv.miniwob
+  open tracks: de.dennisguse.opentracks
+  open tracks sports tracker: de.dennisguse.opentracks
+  opentracks: de.dennisguse.opentracks
+  osmand: net.osmand
+  phone: com.google.android.dialer
+  photos: com.google.android.apps.photos
+  pro expense: com.arduia.expense
+  pro expense app: com.arduia.expense
+  recipe app: com.flauschcode.broccoli
+  retro: code.name.monkey.retromusic
+  retro music: code.name.monkey.retromusic
+  retro player: code.name.monkey.retromusic
+  settings: com.android.settings
+  simple calendar: com.simplemobiletools.calendar.pro
+  simple calendar pro: com.simplemobiletools.calendar.pro
+  simple draw pro: com.simplemobiletools.draw.pro
+  simple gallery: com.simplemobiletools.gallery.pro
+  simple gallery pro: com.simplemobiletools.gallery.pro
+  simple sms: com.simplemobiletools.smsmessenger
+  simple sms messenger: com.simplemobiletools.smsmessenger
+  system settings: com.android.settings
+  tasks: org.tasks
+  tasks app: org.tasks
+  tasks.org:: org.tasks
+  vlc: org.videolan.vlc
+  vlc app: org.videolan.vlc
+  vlc player: org.videolan.vlc
+  youtube: com.google.android.youtube
+  yt: com.google.android.youtube

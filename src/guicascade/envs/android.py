@@ -47,36 +47,50 @@ _DEVICE_XML = "/sdcard/guicascade_ui.xml"
 
 
 def load_apps(path: str | Path = "") -> dict[str, str]:
-    """读「应用显示名 -> 包名」表。默认找仓库里的 `configs/apps.yaml`。
+    """读「应用显示名 -> 包名」表。默认读两份并**合并**，先读到的优先：
+
+        configs/apps.yaml      手工 + 扫描，权威，有中文别名
+        configs/apps_aw.yaml   由 `gen_apps.py` 从 AndroidWorld 的表生成
+
+    分成两份是刻意的：生成的那份会随设备反复重写，而手工那份里有解释性的
+    注释和中文别名，不能被生成器冲掉。
 
     **读不到就返回空表，而不是抛异常。** 理由是退化的后果很轻：`open_app`
-    依然接受包名，只是模型不能再用中文名指代应用。为了缺一个配置文件就让
+    依然接受包名，只是模型不能再用名字指代应用。为了缺一个配置文件就让
     整个环境起不来，不划算。
 
-    表由 `scripts/scan_apps.py` 扫设备生成——**它是设备数据，不是源代码**，
-    换设备必须重扫。见 `AndroidEnv.apps` 的说明。
+    传了 `path` 就只读那一份（调试用），不合并。
+
+    ⚠️ 这张表**漏了应用不是"少几个名字"这么轻**：查不到会抛异常，异常被
+    `env.step` 吞进 `StepResult.error`，而那个 error 不进提示词 —— 模型于是
+    重复同一个动作直到步数用完。实测漏了 17 个官方应用（录音机、Broccoli、
+    VLC…），这是"模型在打转"的主要来源。补表用 `python scripts/gen_apps.py`。
+
+    表是**设备数据，不是源代码**，换设备必须重新生成。见 `AndroidEnv.apps`。
     """
-    candidates = []
     if path:
-        candidates.append(Path(path))
-    else:
-        here = Path(__file__).resolve()
-        # src/guicascade/envs/android.py -> 仓库根
-        candidates.append(here.parents[3] / "configs" / "apps.yaml")
+        return _read_apps_file(Path(path))
 
-    for p in candidates:
-        if not p.exists():
-            continue
-        try:
-            import yaml
+    cfg = Path(__file__).resolve().parents[3] / "configs"
+    out: dict[str, str] = {}
+    for name in ("apps.yaml", "apps_aw.yaml"):
+        for k, v in _read_apps_file(cfg / name).items():
+            out.setdefault(k, v)      # 先读到的赢：手工表压过生成表
+    return out
 
-            data = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
-        except Exception:  # noqa: BLE001 - 配置坏了也不该让环境起不来
-            continue
-        apps = data.get("apps")
-        if isinstance(apps, dict):
-            return {str(k): str(v) for k, v in apps.items()}
-    return {}
+
+def _read_apps_file(p: Path) -> dict[str, str]:
+    """读一个 YAML 的 apps 段。坏了就当空表——缺个配置不该让环境起不来。"""
+    if not p.exists():
+        return {}
+    try:
+        import yaml
+
+        data = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+    except Exception:  # noqa: BLE001
+        return {}
+    apps = data.get("apps")
+    return {str(k): str(v) for k, v in apps.items()} if isinstance(apps, dict) else {}
 
 
 def find_adb() -> str:
@@ -242,7 +256,14 @@ class AndroidEnv:
 
         # 报错里列**原始写法**（Clock / 时钟），不是内部小写索引。
         # 这句话是给模型看的，给它一份全小写的清单会诱导它继续写小写。
-        known = ", ".join(sorted(self.apps)) if self.apps else "（本设备未登记任何应用名，请直接用包名）"
+        #
+        # ⚠️ 清单要**截断**。表补全之后有 100 多条，全列出来是上千字符，
+        # 而这句话会进提示词的 `Result:` 行 —— 会把屏幕内容挤掉，得不偿失。
+        # 表里没有的名字本来就不该指望靠报错去撞。
+        names = sorted(self.apps)
+        known = ", ".join(names[:24]) if names else "（本设备未登记任何应用名，请直接用包名）"
+        if len(names) > 24:
+            known += f" …（共 {len(names)} 个）"
         raise ValueError(f"不认识的应用名 {name!r}。可直接用包名，或用以下任一名字：{known}")
 
     # ------------------------------------------------------------------
