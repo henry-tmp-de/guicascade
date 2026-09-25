@@ -45,6 +45,11 @@ __all__ = ["AndroidEnv", "android_action_space", "find_adb", "load_apps"]
 
 _DEVICE_XML = "/sdcard/guicascade_ui.xml"
 
+# 从 `dumpsys window displays` 里抠出前台窗口属于哪个包。
+# 形如：mCurrentFocus=Window{f77933c u0 com.dimowner.audiorecorder/.app.main.MainActivity}
+# 中间那串是窗口 hash 和用户号，用非贪婪匹配跳过。
+_FOCUS_RE = re.compile(r"mCurrentFocus=Window\{[^}]*?\s([\w\.]+)/")
+
 
 def load_apps(path: str | Path = "") -> dict[str, str]:
     """读「应用显示名 -> 包名」表。默认读两份并**合并**，先读到的优先：
@@ -267,6 +272,121 @@ class AndroidEnv:
         raise ValueError(f"不认识的应用名 {name!r}。可直接用包名，或用以下任一名字：{known}")
 
     # ------------------------------------------------------------------
+    # 启动 app：**启动完必须确认它真的到了前台**
+    # ------------------------------------------------------------------
+
+    def foreground_package(self) -> str:
+        """当前前台窗口属于哪个包。读不到返回空串。
+
+        ⚠️ 看 `mCurrentFocus` 而不是 `mResumedActivity`：
+
+        - 弹窗（权限框、「打开方式」选择器、app 自己的欢迎页）盖上来时，
+          `mResumedActivity` 还停在**下层**那个 activity 上，而
+          `mCurrentFocus` 指向真正在接收输入的那个窗口。判断"app 到底有没有
+          到前台"要看后者。
+        - 实测 `dumpsys activity activities` 里有时**一行 mResumedActivity
+          都没有**，而 `dumpsys window displays` 一直有。
+        """
+        try:
+            out = self._run("shell", "dumpsys", "window", "displays", timeout=20)
+        except Exception:  # noqa: BLE001 - 读不到就返回"不知道"，别让调用方崩
+            return ""
+        m = _FOCUS_RE.search(out.decode("utf-8", "replace"))
+        return m.group(1) if m else ""
+
+    def _await_foreground(self, pkg: str, tries: int = 16, gap: float = 0.5) -> bool:
+        """轮询等 `pkg` 到前台。
+
+        **必须轮询，不能发完命令立刻读一次**：启动是异步的，立刻读到的
+        还是上一个界面——那正是"以为没起来、其实起来了"的假故障来源。
+        """
+        for _ in range(tries):
+            if self.foreground_package() == pkg:
+                return True
+            time.sleep(gap)
+        return False
+
+    def _launcher_activity(self, pkg: str) -> str:
+        """问系统要这个包的启动入口，形如 `包名/.MainActivity`；问不到返回空串。
+
+        用 `cmd package resolve-activity` 而不是自己维护一张表：
+        **哪些包有启动入口是设备的事实**，写死了換 app 就错。
+        """
+        try:
+            out = self._run("shell", "cmd", "package", "resolve-activity", "--brief",
+                            "-c", "android.intent.category.LAUNCHER", pkg, timeout=20)
+        except Exception:  # noqa: BLE001
+            return ""
+        for ln in out.decode("utf-8", "replace").splitlines():
+            ln = ln.strip()
+            if ln.startswith("priority"):
+                continue
+            if "/" in ln:
+                return ln
+        return ""
+
+    def _open_app(self, pkg: str) -> None:
+        """启动 app，**并确认它真的到了前台**；没到就抛异常。
+
+        ## 为什么不能只看命令的退出码
+
+        **退出码 0 ≠ 屏幕上真的是这个 app。** 启动是异步的，`monkey` 成功
+        注入事件也不代表 activity 起来了——app 可能立刻崩、可能被一个对话框
+        挡在后面、也可能启动慢到这一拍的观察里还没画出来。
+
+        我们真正关心的是"**前台是不是它**"，那就直接去读前台窗口。
+        这是**直接判据**；退出码是间接判据，两者不一致时以前者为准。
+
+        （顺带一提 `_run` 的报错判据是"退出码非 0 **且** stderr 非空"——
+        两个条件缺一个就静默通过。命令失败却没写 stderr 的情况会被漏掉，
+        这也是不能只依赖它的原因。）
+
+        ⚠️ **一个我踩过的测量坑，写在这儿免得下次再犯**：最早判断
+        `monkey` 失败时是否静默返回 0，我用了 `adb shell ... | tail` 再看
+        `$?` —— 那取到的是 **`tail` 的退出码**，不是 monkey 的，于是得出
+        "退出码 0、静默失败"的错误结论。直接测（不经管道）的真实结果是：
+        正常包 0、没有启动入口的包和根本不存在的包都是 **252**。
+        **要测一个命令的退出码，就别把它接进管道。**
+
+        ## 做法
+
+        1. 常规方式 monkey 启动
+        2. 轮询前台，确认目标 app 真的上来了
+        3. 没上来就退一步问系统要启动 activity，用 `am start -n` 再来一次
+           （有些 app 就是没有 monkey 能用的 LAUNCHER 入口）
+        4. 还是没上来 -> **抛异常**，让 `step()` 记成 `ok=False`，
+           模型下一轮就能看到"执行失败 + 当前前台是什么"，
+           而不是傻等到步数耗尽
+
+        ## 已知的保守之处
+
+        如果启动后弹了「打开方式」选择器这类对话框，前台会变成 `android`
+        而不是目标包，这里会判成"没到前台"。**这是有意选的保守方向**：
+        报一句"没到前台、当前前台是 X"给模型，比默认它成功了更有用——
+        模型能据此去处理那个框。真实情况写进报错文本里，不做隐瞒。
+        """
+        self._run("shell", "monkey", "-p", pkg, "-c",
+                  "android.intent.category.LAUNCHER", "1", timeout=30)
+        if self._await_foreground(pkg):
+            return
+
+        act = self._launcher_activity(pkg)
+        if act:
+            try:
+                self._run("shell", "am", "start", "-n", act, timeout=30)
+            except Exception:  # noqa: BLE001 - 退路失败就走下面统一报错
+                pass
+            if self._await_foreground(pkg):
+                return
+
+        here = self.foreground_package() or "读不到"
+        raise RuntimeError(
+            f"没能把 {pkg} 拉到前台（monkey 和显式 activity 都试过）。"
+            f"当前前台是 {here}。app 可能没装、可能没有启动入口、"
+            f"也可能被一个对话框挡住了。"
+        )
+
+    # ------------------------------------------------------------------
     # adb 原语
     # ------------------------------------------------------------------
 
@@ -460,8 +580,7 @@ class AndroidEnv:
             self._run("shell", "input", "keyevent", "KEYCODE_ENTER")
         elif a == "open_app":
             pkg = self.resolve_app(args.get("app_name") or args.get("package", ""))
-            self._run("shell", "monkey", "-p", pkg, "-c",
-                      "android.intent.category.LAUNCHER", "1", timeout=30)
+            self._open_app(pkg)
         elif a == "wait":
             time.sleep(float(args.get("seconds", 1.0)))
         elif a in ("finish", "answer"):

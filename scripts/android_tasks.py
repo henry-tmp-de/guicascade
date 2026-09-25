@@ -165,37 +165,48 @@ def check_network(adb: str, serial: str) -> tuple[bool, str]:
 
     ## 检查什么
 
-    只检查**任务真正依赖的东西**，不做泛泛的连通性测试：
+    只检查**任务真正依赖的东西**，而且**只认真实行为**：
 
-    - 基本 IP 连通（`ping` 一个 IP，不依赖 DNS）
-    - DNS 能解析（`net.dns1` 有没有值 + 能不能解析出域名）
-    - 任务要访问的站点真的能打开
+    - 飞行模式是不是开着（这个会实打实地断网）
+    - 真去 TCP 连一次 `www.bing.com:80` —— 一条命令同时考了 DNS、
+      路由和对外连通，而且这正是浏览器任务要做的那件事
 
-    ⚠️ 这个环境的两个已知特点（写在这里，免得下次又当成模型问题）：
-      1. **HTTPS 走不通**（TLS 握手被掐，ERR_CONNECTION_CLOSED），HTTP 正常
-      2. **Google 被 DNS 污染**（解析到 185.45.5.35），bing / baidu 正常
+    ⚠️ 这个环境的三个已知特点（写在这里，免得下次又当成模型问题）：
+      1. **ICMP 永远不通，而且这是正常的**：模拟器走 QEMU 用户态网络
+         （slirp），slirp 不转发 ICMP。**所以判据里绝不能用 ping。**
+      2. **HTTPS 走不通**（TLS 握手被掐，ERR_CONNECTION_CLOSED），HTTP 正常
+      3. **Google 被 DNS 污染**（解析到 185.45.5.35），bing / baidu 正常
     """
     problems: list[str] = []
 
     if _setting(adb, serial, "global", "airplane_mode_on") == "1":
         problems.append("飞行模式开着")
 
-    ping = _shell(adb, serial, "ping", "-c", "2", "-W", "4", "8.8.8.8")
-    if "bytes from" not in ping:
-        problems.append("ping 8.8.8.8 不通（IP 层就没通）")
-
-    # ⚠️ **只看实际能不能解析，不看 `net.dns1`。**
+    # 判据是"**真的连一次 TCP**"，不是 ping。
     #
-    # 早先这里加了一条 `net.dns1` 为空的判据，结果制造了一批假阴性：
-    # `net.dns1` 是**Android 10 之前**的属性，现代 Android 走的是
-    # `PrivateDns`/`resolv` 那套，这个属性**空着是正常的**。
-    # 实测：`net.dns1` 为空、但 `www.bing.com` 解析并 ping 通（437ms）。
+    # ⚠️ 这个环境里 **ICMP 永远不通，而且这是正常的**：模拟器走的是 QEMU 的
+    # 用户态网络（slirp），slirp 不转发 ICMP。实测（2026-09-25）：
     #
-    # 教训和这个项目里其它几次一样：**拿一个"看起来该有"的字段当判据，
-    # 而不是拿真实行为当判据**，就会在正常环境下报故障。
-    resolved = _shell(adb, serial, "ping", "-c", "1", "-W", "5", "www.bing.com")
-    if "bytes from" not in resolved and "PING" not in resolved:
-        problems.append("解析/访问 www.bing.com 失败（浏览器任务会因此必挂）")
+    #     ping 8.8.8.8        -> 100% packet loss
+    #     路由表              -> 只有 10.0.0.0/8，补了 default 也一样
+    #     nc -w 6 www.baidu.com 80 -> rc=0        <- TCP 好好的
+    #     nc -w 6 www.bing.com  80 -> rc=0
+    #     nc -w 5 <不存在的域名> 80 -> rc=1       <- 这个测法有判别力
+    #
+    # 之前这里用 ping 当判据，后果是**每一条记录都带一句"网络不可用"**，
+    # 而网络其实是好的。**一个永远触发的检查比没有检查更糟**：它会训练人
+    # 忽略错误，真正出问题那天也没人看。
+    #
+    # 顺带说明为什么不用 `net.dns1`：那是 Android 10 之前的属性，现代 Android
+    # 走 PrivateDns/resolv 那套，**这个属性空着是正常的**。拿"看起来该有的
+    # 字段"当判据而不是拿真实行为当判据，就会在正常环境下报故障。
+    net = _shell(adb, serial, "sh", "-c",
+                 "command -v nc >/dev/null 2>&1 || { echo NO_NC; exit 9; }; "
+                 "echo -n '' | nc -w 6 www.bing.com 80; echo rc=$?")
+    if "NO_NC" not in net and "rc=0" not in net:
+        # 镜像里没带 nc 时**不报故障**：那是"这一项没法测"，不是"网络坏"。
+        # 拿工具缺失当故障判据，就又犯了"用间接指标代替真实行为"的老毛病。
+        problems.append("连不上 www.bing.com:80（TCP 层就不通，浏览器任务必挂）")
 
     if problems:
         return False, "；".join(problems)

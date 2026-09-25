@@ -167,9 +167,39 @@ class AndroidWorldBridge:
                 return ok()
 
             if kind == "start_activity":
+                # ⚠️ 字段名是 **`full_activity`**，不是 `activity`。
+                #
+                # 这里原先写的是 `a.activity` —— 那个字段**根本不存在**，
+                # 读它立刻抛 AttributeError，被本函数末尾的兜底 `except`
+                # 吃掉，返回一个失败响应；官方 `adb_utils.check_ok()` 于是报
+                # `Failed to launch activity: '包/Activity'`。
+                #
+                # 也就是说：**经过桥接层的每一次 start_activity 从来没成功过。**
+                # 这个 bug 极难查，因为异常信息在官方那边只剩一句"启动失败"，
+                # 看起来像"这个 app 起不来"，而不像"我们读错了字段名"。
+                #
+                # （顺带记一笔：原来的表达式 `f"{a.activity}/{a.activity}" if
+                # "." in a.activity else a.activity` 还有第二个 bug —— 就算
+                # 字段名对了，它也会把 `包/Activity` 拼成 `包/Activity/Activity`，
+                # `am start` 报 `Error type 3: Activity class does not exist`。
+                # 两个 bug 叠在一起，所以怎么调试都是"启动失败"。）
+                #
+                # 后果远不止"这个 app 起不来"。官方 `SQLiteApp._clear_db()`
+                # 在发现表不存在时会**靠 `launch_app` 启动 app 来建库**
+                # （原话："opening the app may create it"）。启动失败 ->
+                # 库没建出来 -> 紧接着执行 `DELETE FROM <表>` -> 抛
+                # `no such table` -> **任务在 initialize_task 就废**，
+                # 而它看起来就像"模型不会用这个 app"。
+                # 实测 `OsmAndMarker` 正是这么挂的。
                 a = request.start_activity
-                self._shell("shell", "am", "start", "-n", f"{a.activity}/{a.activity}"
-                            if "." in a.activity else a.activity, timeout=timeout)
+                if a.force_stop:
+                    # StartActivity 里还带一个 force_stop 开关，之前整个忽略了
+                    pkg = a.full_activity.split("/")[0]
+                    self._shell("shell", "am", "force-stop", pkg, timeout=timeout)
+                cmd = ["shell", "am", "start", "-n", a.full_activity]
+                if a.extra_args:
+                    cmd.extend(a.extra_args)
+                self._shell(*cmd, timeout=timeout)
                 return ok(start_activity=adb_pb2.AdbResponse.StartActivityResponse())
 
             if kind == "get_current_activity":
