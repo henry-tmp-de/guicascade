@@ -43,42 +43,74 @@ __all__ = ["UnifiedTask", "collect_tasks", "AW_APPS_WE_HAVE"]
 AW_PATH = Path("D:/学习/code/_aw")
 """AndroidWorld 源码位置。换机器改这里，或设环境变量 ANDROID_WORLD_PATH。"""
 
-AW_APPS_WE_HAVE = {
-    # 系统自带
-    "settings", "clock", "chrome", "camera", "contacts", "files", "dialer",
-    # AndroidWorld 自带的那批（用 scripts/setup_androidworld_env.py 装的）
-    "markor", "broccoli app", "pro expense", "simple calendar pro",
-    "simple sms messenger", "simple gallery pro", "retro music", "vlc",
-    "clipper", "tasks", "joplin", "audio recorder", "opentracks",
-    "simple draw pro", "android world",
-}
-"""设备上装了哪些 app——**这决定了哪些 AndroidWorld 任务可跑**。
+AW_APPS_WE_HAVE = "（已废弃，见下）"
+"""**这张表已经不用了**，留着只为说明它为什么消失。
 
-装它那批 app 之前，这个集合只有系统自带的 7 个，于是 116 个任务里只有
-20 个能进来，而且其中 6 个还因为缺预置数据跑不了。
+它原本写死"设备上装了哪些 app"，用来决定哪些任务能跑。问题是它有两重脆弱：
 
-现在用 `scripts/setup_androidworld_env.py` 把 markor（17 个任务）、
-broccoli（13 个）、pro expense（9 个）这些装上之后，可跑的任务面**大了一个量级**。"""
+  1. 装了什么 app，是**运行时的事实**，不是源码里的常量
+  2. 更关键的是——**装了 app ≠ 任务能跑**。任务还要 app 里有预置数据
+     （联系人、下载好的文件、造好的笔记），那些在**快照**里
 
-_NEEDS_AW_ENV = {
-    # 这些任务的前置数据（文件、网页）**不在任务代码里，而在快照里**。
-    # AndroidWorld 的 `initialize_task` 会去还原预置的 app 快照：
-    #     /data/data/android_world/snapshots/<app>/
-    # 那个目录来自它**定制的模拟器镜像**，我们这台设备上根本不存在
-    # （实测：`/data/data/android_world/` 整个目录都没有）。
-    #
-    # 后果是 `initialize_task` **静默失败**——只打一行 warning，
-    # 任务照跑，但 Agent 要找的东西压根不在设备上，必然失败。
-    # 这种失败会被记成"模型不行"，所以**必须从列表里剔掉**，不能留着充数。
-    #
-    # 换用 AndroidWorld 官方 AVD（带全部 app + 快照）之后可以把它们加回来。
-    "BrowserDraw",            # 需要 /sdcard/Download/task.html
-    "BrowserMaze",            # 同上
-    "BrowserMultiply",        # 同上
-    "FilesDeleteFile",        # 需要预置文件 jolly_tree_final.pdf 等
-    "FilesMoveFile",          # 需要预置文件
-    "ContactsNewContactDraft",  # 读 UI 树，我们的 forest 结构和它家对不上
-}
+所以现在改成查盘上真实的快照目录，见 `snapshot_packages()`。
+装了什么、数据齐没齐，都以设备当前状态为准。
+"""
+
+SNAPSHOT_DIR = "/data/data/android_world/snapshots"
+"""AndroidWorld 官方快照目录。**盘上有没有这个包，决定任务收不收。**
+
+之前这里是一张写死的黑名单（`_NEEDS_AW_ENV`），因为当时没跑官方 setup、
+设备上一份快照都没有，只能手工把依赖数据的任务挑出来剔掉。
+
+那张表的毛病和所有写死的表一样：**它会过期，而且过期时不报错**。
+官方 setup 跑完之后快照齐了，它还在默默剔任务，最后你会以为
+"这些任务就是跑不了"，其实是自己把自己过滤掉了。
+
+改成查盘上真实存在的快照——数据在，任务就进；数据不在，任务就不进。
+这张表永远和现实一致，不需要人维护。
+"""
+
+
+def snapshot_packages(adb: str, serial: str) -> set[str]:
+    """设备上已经有官方快照的包名集合（形如 `net.gsantner.markor`）。
+
+    查不到就返回空集——**返回空集会让所有依赖数据的任务被剔掉**，
+    这是保守方向：宁少跑几个，也不让任务去找不存在的数据然后判负。
+    """
+    import subprocess  # noqa: PLC0415
+
+    try:
+        p = subprocess.run(
+            [adb, "-s", serial, "shell", "ls", "-1", SNAPSHOT_DIR],
+            capture_output=True, timeout=60,
+        )
+        raw = p.stdout.decode("utf-8", "replace")
+    except Exception:  # noqa: BLE001
+        return set()
+    return {ln.strip() for ln in raw.splitlines() if ln.strip() and "/" not in ln}
+
+
+def _app_to_package(aw_path: Path, app_names) -> dict[str, str]:
+    """AndroidWorld 的 app 短名 → 包名。
+
+    它自己那套 `get_adb_activity` + `extract_package_name` 是纯查表，
+    不需要 env，直接借来用——**不要自己再写一份映射**，
+    那种表迟早和它的版本对不上。
+    """
+    if str(aw_path) not in sys.path:
+        sys.path.insert(0, str(aw_path))
+    from android_world.env import adb_utils  # noqa: PLC0415
+
+    out = {}
+    for a in app_names:
+        try:
+            act = adb_utils.get_adb_activity(a)
+            if act:
+                out[a] = adb_utils.extract_package_name(act)
+        except Exception:  # noqa: BLE001
+            pass
+    return out
+
 
 _EXCLUDE_SUFFIX = "Verify"
 """见模块开头对 Verify 白送分的说明。
@@ -114,6 +146,24 @@ def _ours(adb: str, serial: str) -> list[UnifiedTask]:
     return out
 
 
+def _official_budget(cls, fallback: int = 20) -> int:
+    """官方给这个任务的步数预算 = `int(10 * complexity)`。
+
+    直接读它的 `complexity`，**不要自己另定一套**——那样跑出来的成功率
+    和官方榜单上的数字就没法比了，而这个项目里"能和官方对齐"比"跑得好看"重要。
+
+    复杂度拿不到时退回 fallback。**要有 fallback**：任务类没有 complexity
+    属性的话，上面直接 `int(10 * None)` 会抛异常，一个任务把整张任务表带崩。
+    """
+    try:
+        comp = getattr(cls, "complexity", None)
+        if comp is None:
+            return fallback
+        return max(1, int(10 * float(comp)))
+    except Exception:  # noqa: BLE001
+        return fallback
+
+
 def _androidworld(adb: str, serial: str, aw_path: Path) -> list[UnifiedTask]:
     """把 AndroidWorld 的任务包成同一个形状。
 
@@ -131,19 +181,33 @@ def _androidworld(adb: str, serial: str, aw_path: Path) -> list[UnifiedTask]:
     reg = registry.TaskRegistry().get_registry(registry.TaskRegistry.ANDROID_FAMILY)
     bridge = AndroidWorldBridge(adb=adb, serial=serial, aw_path=aw_path)
 
+    # 盘上真实存在的快照 —— 这是"这个任务的前置数据到底有没有"的唯一依据
+    have_snap = snapshot_packages(adb, serial)
+    all_apps: set[str] = set()
+    for c in reg.values():
+        all_apps |= set(getattr(c, "app_names", []) or [])
+    pkg_of = _app_to_package(aw_path, sorted(all_apps))
+
     out = []
+    missing: dict[str, str] = {}     # 任务名 -> 缺哪个包，末尾打出来
     for name in sorted(reg):
         cls = reg[name]
         try:
             apps = set(cls.app_names)
         except Exception:  # noqa: BLE001
             continue
-        if not apps or not apps <= AW_APPS_WE_HAVE:
-            continue          # 依赖我们没装的 app
+        if not apps:
+            continue
         if name.endswith(_EXCLUDE_SUFFIX):
             continue          # 见模块开头：起点就判成功，白送分
-        if name in _NEEDS_AW_ENV:
-            continue          # 前置数据在快照里，我们设备上没有
+
+        # 这个任务的每个 app 都得有快照，否则 initialize_task 会**静默失败**——
+        # 只打一行 warning 就继续跑，Agent 去找不存在的东西，必然失败，
+        # 然后这笔账记到模型头上。所以宁可不放进来。
+        gone = [a for a in apps if pkg_of.get(a) and pkg_of[a] not in have_snap]
+        if gone:
+            missing[name] = ",".join(gone)
+            continue
 
         # 参数固定下来：随机参数会让两次跑的不是同一个任务，
         # 没法比较，也没法复现。**评测要的是可比性，不是多样性。**
@@ -152,29 +216,73 @@ def _androidworld(adb: str, serial: str, aw_path: Path) -> list[UnifiedTask]:
         except Exception:  # noqa: BLE001
             continue
 
-        # 实例化一次，三个回调闭包共用同一个 task 对象——
-        # 它内部有 `initialized` 状态，setup/check 必须是同一个实例，
-        # 各建一个的话 `is_successful` 会报"还没初始化"。
-        task = cls(params)
-        goal = task.goal
+        goal = cls(params).goal
 
-        def setup(t=task, b=bridge):
+        # ⚠️ **每次跑都要新建实例，不能复用。**
+        #
+        # 这里的矛盾很微妙：
+        #
+        #   同一个 run 内：setup 和 check **必须是同一个实例**
+        #                  （`is_successful` 要读 `initialize_task` 存下的
+        #                    `before_photos` 之类的前置快照）
+        #   跨 run：       又**必须换新实例**——`initialize_task` 里有
+        #                  "已经调用过就抛异常"的守卫，复用的话第二次跑
+        #                  在起点就报 `initialize_task() is already called`
+        #
+        # 早先为了满足前半条，把实例建在循环外面三个闭包共用，于是**同一个
+        # 任务跑第二遍必挂**。三形态要跑同一个任务三遍，正好踩满。
+        # 之所以一直没暴露，是因为任务表有 5 分钟缓存：缓存一过期，
+        # `collect_tasks` 重跑，实例也就换了——**失败与否取决于两次跑
+        # 隔了多久**，这种 bug 最难查。
+        #
+        # 现在用 `box` 把"这一轮的实例"串起来：setup 建、check/teardown 取。
+        box: dict = {}
+
+        def setup(b=bridge, c=cls, p=params, bx=box):
+            t = c(p)
             t.initialize_task(b)
+            bx["t"] = t
 
-        def check(t=task, b=bridge):
-            return bool(round(t.is_successful(b)))
+        def check(b=bridge, bx=box):
+            t = bx.get("t")
+            return bool(round(t.is_successful(b))) if t is not None else False
 
-        def teardown(t=task, b=bridge):
+        def teardown(b=bridge, bx=box):
+            t = bx.get("t")
+            if t is None:
+                return
             try:
                 t.tear_down(b)
             except Exception:  # noqa: BLE001 - 清场失败不该影响结果
                 pass
 
+        # 步数上限用**官方的算法**：`suite_utils._allocate_step_budget()` 是
+        # `int(10 * task.complexity)`。
+        #
+        # ⚠️ 之前这里写死 12，是这次全量测试最大的坑：官方给这 59 个任务的预算是
+        # **14~78 步**，12 比最少的那个还低，于是 **57/59 个任务撞上限被截断**。
+        # 结果是"0/59 成功"，但那个 0 主要说明的是**没让模型跑完**，不是模型不行。
+        #
+        # 补一句反面提醒：**给足步数也救不了所有任务**。实测轨迹里模型是在打转
+        # （点快门→进相册→返回→再点快门），给它 78 步它还是打转。
+        # 所以截断和"模型弱"是两个并存的原因，报告里要分开说。
+        budget = _official_budget(cls)
         out.append(UnifiedTask(
             key=f"aw:{name}", name=name, source="androidworld",
-            instruction=goal, steps_hint=(5, 15),
+            instruction=goal, steps_hint=(budget, budget),
             setup=setup, check=check, teardown=teardown,
         ))
+
+    # **过滤必须出声。** 静默剔任务的后果和静默失败一样：你看到的任务列表
+    # 变短了，但没有任何东西告诉你为什么——最后会得出"这些任务跑不了"的
+    # 错误结论，而实际上是数据没准备好。
+    print(f"[task_sets] 快照 {len(have_snap)} 个；"
+          f"收录 {len(out)} 个 AndroidWorld 任务，"
+          f"因缺数据剔除 {len(missing)} 个")
+    for nm, pkgs in sorted(missing.items())[:8]:
+        print(f"             · {nm} 缺 {pkgs}")
+    if len(missing) > 8:
+        print(f"             …还有 {len(missing)-8} 个")
     return out
 
 

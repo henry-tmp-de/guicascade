@@ -65,6 +65,38 @@ __all__ = ["main"]
 
 
 @dataclass
+def _shrink(png: bytes, width: int = 420) -> bytes:
+    """把截图缩小再存盘。
+
+    ## 为什么必须缩
+
+    设备是 1080×2400，原图 PNG 一张 **~1.4MB**。前端显示宽度只有 104px
+    （点开放大也远用不到原图）。不缩的话：
+
+        跑一夜 ≈ 2009 步/形态 × 3 形态 × 1.4MB ≈ 8.4 GB
+
+    这不只是占地方——**写盘本身会把跑测拖慢**，而且磁盘满了会让整轮
+    任务静默失败。缩到 420px 宽之后约 40KB，同样的量级降到 250MB。
+
+    用 JPEG 不用 PNG：截图是大色块界面，JPEG 在同样观感下小一个量级。
+    缩放失败就原样返回——**降级而不是抛异常**，一张图不该让整轮跑挂掉。
+    """
+    try:
+        import io
+
+        from PIL import Image
+
+        im = Image.open(io.BytesIO(png)).convert("RGB")
+        if im.width > width:
+            im = im.resize((width, round(im.height * width / im.width)),
+                           Image.LANCZOS)
+        buf = io.BytesIO()
+        im.save(buf, format="JPEG", quality=72, optimize=True)
+        return buf.getvalue()
+    except Exception:  # noqa: BLE001
+        return png
+
+
 class StreamTracer:
     """把每一步推进一个队列，供 SSE 取走。
 
@@ -98,10 +130,25 @@ class StreamTracer:
         d = step.to_dict()
         idx = int(d.get("step", 0))
 
-        # 截图：有就存下来，前端按 index 取
+        # 截图：**内存一份 + 磁盘一份**。
+        #
+        # 内存那份给正在看的人（快），磁盘那份给明天来翻记录的人（留得住）。
+        # 只留内存的话，服务器一重启，历史记录里所有截图都变成裂图，
+        # 而 DOM 文本还在——看起来像"截图功能坏了"，实际上是没存。
         img = getattr(step.observation, "image", None)
         if img:
             self.shots[idx] = img
+            try:
+                # ⚠️ 变量名**不能叫 `d`**：上面 `d = step.to_dict()` 已经用了，
+                # 覆盖掉之后下面 `d.get("model")` 就变成对 Path 调 .get，
+                # 每一步都抛 AttributeError，**整轮任务 0 步就死**。
+                # 症状是"所有任务都跑不起来、只有 20 秒"，很难联想到是
+                # 一个局部变量名。加截图功能时就是这么把自己绊倒的。
+                shot_dir = _SHOT_DIR / self.run_id
+                shot_dir.mkdir(parents=True, exist_ok=True)
+                (shot_dir / f"{idx}.jpg").write_bytes(_shrink(img))
+            except OSError:
+                pass      # 写盘失败不该把这一轮跑挂掉，内存那份还在
 
         # 给模型看的屏幕文本也带上——**这是排查问题最有用的一栏**：
         # 模型看到什么、说了什么，并排看才知道它为什么那样决策。
@@ -273,13 +320,22 @@ def _run_task(run_id: str, cfg_path: str, instruction: str, task_name: str,
         emit_error(f"{type(e).__name__}: {e}")
         tracer.q.put({"type": "traceback", "text": traceback.format_exc()[-1500:]})
         tracer.q.put({"type": "done", "success": False, "summary": {}})
+    finally:
         # 记录落到**服务端**，不是浏览器 localStorage。
         #
         # 理由：批量跑一轮要一两个小时，用 CLI 驱动（浏览器关掉也能跑）。
         # 记录只存浏览器的话，CLI 跑出来的结果前端看不见，两边就成了两套数据。
         # 存服务端则**两边看的是同一份**，谁跑的都能在页面上看到。
+        #
+        # ⚠️ **必须放在 finally 里，不能只放在 except 里。**
+        #
+        # 早先它挂在 `except` 分支下面，于是**只有崩掉的任务才会被记录**，
+        # 正常跑完的（不管成功还是失败）全部不落盘。这个 bug 极其安静：
+        # 单跑一个任务时你会去看终端输出，感觉「记录功能是好的」；
+        # 只有整批跑完、回头翻记录，才会发现**只有异常的那几条**。
+        # 一夜跑下来前端一片空白，而日志里什么错都没有。
         _append_record(cfg_path, task_name, instruction, tracer)
-    finally:
+
         # 释放锁：**必须在 finally 里**，否则异常路径会把服务永久锁死
         if _CURRENT[0] and _CURRENT[0].get("run_id") == run_id:
             _CURRENT[0] = None
@@ -347,6 +403,11 @@ def _tasks_cached(adb: str, serial: str) -> dict:
 # --------------------------------------------------------------------------
 
 _RECORDS = ROOT / "results" / "web_records.jsonl"
+_SHOT_DIR = ROOT / "results" / "shots"
+"""每一步的截图落盘位置：`results/shots/<run_id>/<步号>.png`。
+
+放 `results/` 下是因为**跑测的产物都该在一处**，找的时候不用满盘翻。
+一张约 50KB，一轮 59 任务 × 平均 20 步 ≈ 60MB，三形态不到 200MB，可以接受。"""
 """一行一轮，跑完即落盘。**追加写**，所以中途挂了也不丢已完成的。"""
 
 _CONFIG_KEY = {
@@ -466,11 +527,26 @@ class Handler(BaseHTTPRequestHandler):
             parts = path.split("/")
             run_id, idx = parts[3], int(parts[4])
             run = _RUNS.get(run_id)
+
+            # 先看内存，再回落到磁盘。
+            #
+            # ⚠️ **必须落盘，不能只放内存。** 截图原先只存在 `run.tracer.shots`
+            # 里，服务器一重启就全没了——前端翻历史记录时**图全是裂的**，
+            # 而 DOM 文本还在，看起来像"截图功能坏了"。
+            #
+            # 这个项目里"看到模型当时看到的画面"是排查失败原因最有用的一栏，
+            # 丢了它，失败就只能靠猜。**跑一夜的图必须留得住。**
+            # 内存里那份是原图 PNG（这一轮正在看的），磁盘那份是缩过的 JPEG。
+            # 两处格式不同，**content-type 要跟着变**，否则浏览器可能按错格式解。
             img = run.tracer.shots.get(idx) if run else None
-            if not img:
-                self._send(404, b"no shot", "text/plain")
+            if img:
+                self._send(200, img, "image/png")
                 return
-            self._send(200, img, "image/png")
+            p = _SHOT_DIR / run_id / f"{idx}.jpg"
+            if p.is_file():
+                self._send(200, p.read_bytes(), "image/jpeg")
+                return
+            self._send(404, b"no shot", "text/plain")
             return
 
         if path.startswith("/api/stream/"):
@@ -509,6 +585,19 @@ class Handler(BaseHTTPRequestHandler):
                     self.wfile.flush()
                 except (BrokenPipeError, ConnectionResetError):
                     pass
+                # ⚠️ **必须显式关连接。** 这一行是踩了很久才补上的。
+                #
+                # 上面的 `Connection: keep-alive` + HTTP/1.1 意味着：
+                # handler 返回后 socket **不关**，服务器准备在同一根连接上
+                # 接下一个请求。对普通接口这是对的，但对 SSE 是致命的——
+                # 客户端等的是 EOF，而 EOF 永远不会来。
+                #
+                # 症状极具误导性：任务其实 34 秒就跑完了，事件也全发到了，
+                # 但 `curl --max-time 900` 会**每一轮都耗满 900 秒**。
+                # 75 个任务算下来是 19 小时，而不是 2 小时。
+                # 光看总时长，你会以为是"任务太慢"或"模型太慢"，
+                # 而真相是流没关——**这两种情况的修法完全相反**。
+                self.close_connection = True
                 return
 
             try:

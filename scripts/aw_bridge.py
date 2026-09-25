@@ -194,11 +194,25 @@ class AndroidWorldBridge:
                 out = self._shell("shell", "dumpsys", timeout=timeout)
                 return ok(dumpsys=adb_pb2.AdbResponse.DumpsysResponse(output=out))
 
-            if kind in ("push", "pull"):
-                # 文件传输：判分里用得少，先返回"未实现"而不是假装成功——
-                # **假装成功比报错更糟**：判分会读到一个空文件然后判负，
-                # 看起来像模型的问题。
-                return fail(f"桥接层暂未实现 {kind}", adb_pb2.AdbResponse.UNKNOWN_COMMAND)
+            # ---- 文件传输 ----
+            #
+            # 一开始这两个是"未实现"（宁可报错也不假装成功）。但探针测出来
+            # **75 个任务里有 37 个卡在这里**——expense / calendar / recipe 这些
+            # 任务在 initialize_task 里要先 pull 出 app 的 sqlite 库看初始状态。
+            # 所以它不是"用得少"，是"用得很多，只是我们之前没测到"。
+            #
+            # ⚠️ pull 必须用 `exec-out` 而不是 `shell`：`adb shell cat` 会把
+            # `\n` 翻译成 `\r\n`，sqlite 文件直接被写坏，而且**表现是判分读出来
+            # 一个损坏的库、静默判负**，非常难查。exec-out 是二进制安全的原样通道。
+            if kind == "pull":
+                content = self._exec_out("cat", request.pull.path, timeout=timeout)
+                return ok(pull=adb_pb2.AdbResponse.PullResponse(content=content))
+
+            if kind == "push":
+                self._push_bytes(
+                    request.push.content, request.push.path, timeout=timeout
+                )
+                return ok(push=adb_pb2.AdbResponse.PushResponse())
 
             if kind in ("install_apk", "uninstall_package", "force_stop"):
                 return fail(f"桥接层暂未实现 {kind}", adb_pb2.AdbResponse.UNKNOWN_COMMAND)
@@ -221,6 +235,57 @@ class AndroidWorldBridge:
         不需要真的有一个独立的 controller 对象。
         """
         return self
+
+    def pull_file(
+        self, remote_db_file_path: str, timeout_sec: float | None = None
+    ):
+        """把设备上某个文件所在的**整个目录**拉到本地临时目录，返回上下文管理器。
+
+        这是 AndroidWorld 原版 `AndroidWorldController.pull_file` 的签名。
+        若干任务（expense / calendar / recipe / retro music）在
+        `initialize_task` 里靠它读 app 的 sqlite 库：
+
+            with env.controller.pull_file(db_path) as tmp:
+                rows = read_sqlite(Path(tmp) / basename(db_path))
+
+        所以**返回值必须是 context manager**，不能直接返回路径——
+        任务代码写的是 `with`，返回 str 会在 `with` 那里就炸。
+
+        注意拉的是**目录**不是单文件：sqlite 有 `-wal`/`-shm` 伴生文件，
+        只拉主库可能读到不完整的数据。原版就是这么做的，照抄。
+        """
+        import os
+
+        from android_world.utils import file_utils  # noqa: PLC0415
+
+        return file_utils.tmp_directory_from_device(
+            os.path.dirname(remote_db_file_path), self, timeout_sec
+        )
+
+    def push_file(
+        self,
+        local_db_file_path: str,
+        remote_db_file_path: str,
+        timeout_sec: float | None = None,
+    ) -> None:
+        """把本地文件推回设备（`pull_file` 的反向操作）。"""
+        import os
+
+        from android_world.utils import file_utils  # noqa: PLC0415
+
+        remote_dir = os.path.dirname(remote_db_file_path)
+        file_utils.clear_directory(remote_dir, self)
+        file_utils.copy_data_to_device(
+            local_db_file_path, remote_db_file_path, self, timeout_sec
+        )
+
+    def get_ui_elements(self) -> list:
+        """当前屏幕解析出的 UIElement 列表。
+
+        大头判分走 adb，但有两个任务（`OpenAppTaskEval` 等）读这个。
+        复用 `get_state` 那条路，保证两边看到的是同一份数据。
+        """
+        return self._to_ui_elements(self._dump_forest())
 
     # ==================================================================
     # env 面 —— 判分里只有少数任务用到
@@ -323,6 +388,44 @@ class AndroidWorldBridge:
             capture_output=True, timeout=timeout,
         )
         return proc.stdout
+
+    def _exec_out(self, *args: str, timeout: float = 30) -> bytes:
+        """`adb exec-out <args>`，**二进制安全**的原样通道。
+
+        和 `_shell` 的区别只在 `exec-out` vs `shell`：后者会做终端行尾翻译
+        （`\\n` → `\\r\\n`）。传文本无所谓，传 sqlite / 图片就完了——
+        而且坏得**静默**：文件能打开、能读表，但内容对不上，
+        最后表现成"判分说数量不对"，没人会想到是 adb 翻译了换行。
+        """
+        proc = subprocess.run(
+            [self.adb, "-s", self.serial, "exec-out", *[str(a) for a in args]],
+            capture_output=True, timeout=timeout,
+        )
+        return proc.stdout
+
+    def _push_bytes(self, content: bytes, remote_path: str, *, timeout: float = 30) -> None:
+        """把内存里的字节推到设备上某个路径。
+
+        adb 没有"从 stdin 推文件"的干净做法，所以先落一个本地临时文件再 push。
+        临时文件用完就删——**不要留在 results/ 里**，那是给人看结果的地方。
+        """
+        import tempfile
+
+        fd, tmp = tempfile.mkstemp(prefix="aw_push_")
+        try:
+            with open(fd, "wb") as f:
+                f.write(content)
+            subprocess.run(
+                [self.adb, "-s", self.serial, "push", tmp, str(remote_path)],
+                capture_output=True, timeout=timeout, check=True,
+            )
+        finally:
+            import os
+
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
 
     def _settings(self, req, timeout: float):
         adb_pb2 = self._adb_pb2
